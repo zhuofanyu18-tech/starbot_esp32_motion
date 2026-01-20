@@ -1,11 +1,19 @@
 #include "BujinControl.h"
 
+// 新增：串口发送延时（毫秒），根据实际硬件调整
+#define SERIAL_CMD_DELAY 5
+// 新增：最大重试次数
+#define MAX_RETRY_COUNT 1
+
 /**
  * @brief    步进电机初始化
  */
 void Emm_V5_INIT(void)
 {
-  Serial2.begin(115200, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+  // 初始化串口2，波特率256000，8数据位，无校验，1停止位，RX引脚GPIO16，TX引脚GPIO17
+  Serial2.begin(256000, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);  // 115200
+  // 清空串口缓冲区
+  while(Serial2.available()) Serial2.read();
 }
 
 /**
@@ -401,9 +409,11 @@ void Emm_V5_Receive_Data(uint8_t *rxCmd, uint8_t *rxCount)
   
   // 初始化接收计数
   *rxCount = 0;
-  
+  // 清空缓冲区
+  memset(rxCmd, 0, 128);
+
   // 设置最大接收时间为200ms
-  while (millis() - startTime < 200)
+  while (millis() - startTime < 100)
   {
     if (Serial2.available() > 0)
     {
@@ -416,7 +426,7 @@ void Emm_V5_Receive_Data(uint8_t *rxCmd, uint8_t *rxCount)
     else
     {
       // 如果10ms内没有新数据，认为一帧数据接收完成
-      if (millis() - lastDataTime > 10 && i > 0)
+      if (millis() - lastDataTime > 5 && i > 0)
       {
         break;
       }
@@ -437,6 +447,9 @@ float Emm_V5_MotorVel_Get(uint8_t addr)
   uint8_t rxCmd[128] = {0};
   uint8_t rxCount = 0;
   
+  // 清空串口缓冲区
+  while(Serial2.available()) Serial2.read();
+
   // 发送读取速度命令
   Emm_V5_Read_Sys_Params(addr, S_VEL);
   
@@ -467,6 +480,9 @@ void Emm_5V_Vel_Set(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, bool s
 {
   uint8_t rxCmd[128] = {0};
   uint8_t rxCount = 0;
+  
+  // 清空串口缓冲区
+  while(Serial2.available()) Serial2.read();
   
   // 发送速度控制命令
   Emm_V5_Vel_Control(addr, dir, vel, acc, snF);

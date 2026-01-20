@@ -1,6 +1,8 @@
 #include "MLTrol.h"
 #include <cmath>
 
+#define SERIAL_DELAY 3
+
 // 里程计结构体的构造函数实现
 OdometryData::OdometryData()
     : pos_x(0), pos_y(0), orientation(0), linear_vel_x(0), linear_vel_y(0), angular_vel(0) {}
@@ -108,11 +110,11 @@ void MecanumKinematics::setMotorSpeed(const WheelSpeeds &speeds)
     // Emm_V5_Vel_Control(3, dir[2], vel_rl, 0, true);
     // Emm_V5_Vel_Control(4, dir[3], vel_rr, 0, true);
     Emm_5V_Vel_Set(1, dir[0], vel_fl, 0, true);
-    delay(5);
+    delay(SERIAL_DELAY);
     Emm_5V_Vel_Set(2, dir[1], vel_fr, 0, true);
-    delay(5);
+    delay(SERIAL_DELAY);
     Emm_5V_Vel_Set(3, dir[2], vel_rl, 0, true);
-    delay(5);
+    delay(SERIAL_DELAY);
     Emm_5V_Vel_Set(4, dir[3], vel_rr, 0, true);
     Emm_V5_Synchronous_motion(0);
     // Emm_V5_Synchronous_motion(2);
