@@ -1,0 +1,17 @@
+{
+    "files.associations": {
+        "deque": "cpp",
+        "string": "cpp",
+        "unordered_map": "cpp",
+        "unordered_set": "cpp",
+        "vector": "cpp",
+        "memory_resource": "cpp",
+        "string_view": "cpp",
+        "memory": "cpp",
+        "iosfwd": "cpp",
+        "sstream": "cpp",
+        "tuple": "cpp",
+        "algorithm": "cpp",
+        "random": "cpp"
+    }
+}

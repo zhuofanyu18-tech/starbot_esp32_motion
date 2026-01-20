@@ -1,0 +1,41 @@
+#include <Arduino.h>
+#include "ServoController.h"
+
+// 创建舵机控制器实例（使用默认地址0x40）
+ServoController servoController;
+
+void setup() {
+    Serial.begin(115200);
+    
+    // 初始化舵机控制器（使用自定义引脚）
+    servoController.begin(6, 5);  // SDA=6, SCL=5, 频率60Hz
+    
+    Serial.println("舵机控制器已初始化");
+}
+
+void loop() {
+    
+    // 设置0号舵机到0度，1号舵机到0度
+    servoController.setAngle(0, 0);
+    servoController.setAngle(1, 0);
+    Serial.println("舵机设置为0度位置");
+    delay(2000);
+    
+    // 设置0号舵机到90度，1号舵机到90度
+    servoController.setAngle(0, 90);
+    servoController.setAngle(1, 90);
+    Serial.println("舵机设置为90度位置");
+    delay(2000);
+    
+    // 设置0号舵机到180度，1号舵机到180度
+    servoController.setAngle(0, 180);
+    servoController.setAngle(1, 180);
+    Serial.println("舵机设置为180度位置");
+    delay(2000);
+    
+    // // 高级用法：自定义脉冲范围
+    // // 有些舵机可能需要不同的脉冲范围（如0.8ms-2.2ms）
+    // servoController.setAngle(0, 90, 0.8, 2.2);
+    // Serial.println("舵机0使用自定义脉冲范围设置到90度");
+    // delay(2000);
+}

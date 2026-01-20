@@ -1,0 +1,29 @@
+#include <Arduino.h>
+#include "BujinControl.h"
+
+void setup()
+{
+    Serial.begin(115200);
+    // 初始化串口
+    Emm_V5_INIT();
+    Emm_V5_En_Control(0, true, false);
+    delay(2000);
+}
+
+void loop()
+{
+    float vel = 0.0f;
+    float Motor_Vel[2];
+    Emm_5V_Vel_Set(1, 0, 200, 0, false);
+    Emm_5V_Vel_Set(2, 0, 200, 0, false);
+    
+
+    Motor_Vel[1] = Emm_V5_MotorVel_Get(1);
+    
+    Serial.println(Motor_Vel[1]);
+    Motor_Vel[2] = Emm_V5_MotorVel_Get(2);
+    Serial.println(Motor_Vel[2]);
+
+    Serial.println("OK3");
+    delay(10);
+}
