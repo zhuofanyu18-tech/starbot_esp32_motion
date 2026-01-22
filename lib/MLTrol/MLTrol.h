@@ -41,7 +41,7 @@ private:
     float wheel_radius; // 轮子的半径
     OdometryData odom_data;  // 里程计数据
     uint32_t last_update_time; // 上次更新时间 (ms)
-    uint32_t count = 0;
+    uint8_t dir[4] = {0}; // 方向数组（0正转，1反转）
 
 public:
     // 构造函数，自动设置车子的配置

@@ -94,7 +94,8 @@ void MecanumKinematics::setMotorSpeed(const WheelSpeeds &speeds)
         return static_cast<uint16_t>(abs(rad_speed) * 9.549f); // 9.549 ≈ 60/(2π)
     };
 
-    uint8_t dir[4] = {0}; // 方向数组（0正转，1反转）
+    // uint8_t dir[4] = {0}; // 方向数组（0正转，1反转)
+    // 此时的dir为全局变量，可供里程计读取函数进行方向的获取
     dir[0] = (speeds.front_left < 0) ? 1 : 0;
     dir[1] = (speeds.front_right < 0) ? 1 : 0;
     dir[2] = (speeds.rear_left < 0) ? 1 : 0;
@@ -137,23 +138,17 @@ void MecanumKinematics::updateOdometry(uint32_t dt_ms)
     // float dt_seconds = 0.01f; // 固定时间步长10ms
     if (dt_seconds <= 0)
         return;
-    // 读取当前电机速度（RPM）并转换为弧度/秒
+    // 读取当前电机速度（RPM）并转换为弧度/秒(此速度没有方向，只有大小)
+    uint16_t vel_fl_rpm = Emm_V5_MotorVel_Get(1);
     uint16_t vel_fr_rpm = Emm_V5_MotorVel_Get(2);    
     uint16_t vel_rl_rpm = Emm_V5_MotorVel_Get(3);
     uint16_t vel_rr_rpm = Emm_V5_MotorVel_Get(4);
-    uint16_t vel_fl_rpm = Emm_V5_MotorVel_Get(1);
+    // 第一次读取时会有错误
     if(vel_fl_rpm == 65535) vel_fl_rpm = 0;
     if(vel_fr_rpm == 65535) vel_fr_rpm = 0;
     if(vel_rl_rpm == 65535) vel_rl_rpm = 0;
     if(vel_rr_rpm == 65535) vel_rr_rpm = 0;
-    Serial.print("测试轮子速度(RPM): ");
-    Serial.print(vel_fl_rpm);
-    Serial.print(", ");
-    Serial.print(vel_fr_rpm);
-    Serial.print(", ");
-    Serial.print(vel_rl_rpm);
-    Serial.print(", ");
-    Serial.println(vel_rr_rpm);
+
     if ((abs(vel_fl_rpm) < 1000) && (abs(vel_fr_rpm) < 1000) && (abs(vel_rl_rpm) < 1000) && (abs(vel_rr_rpm) < 1000))
     {
         // 将RPM转换为弧度/秒
@@ -166,6 +161,16 @@ void MecanumKinematics::updateOdometry(uint32_t dt_ms)
         float vel_fr = rpmToRad(vel_fr_rpm);
         float vel_rl = rpmToRad(vel_rl_rpm);
         float vel_rr = rpmToRad(vel_rr_rpm);
+        // 此时需要根据发送的速度时的数值获取方向()，0为正转，1为转
+        vel_fl = (dir[0] == 0) ? vel_fl : -vel_fl;
+        vel_fr = (dir[1] == 0) ? vel_fr : -vel_fr;
+        vel_rl = (dir[2] == 0) ? vel_rl : -vel_rl;
+        vel_rr = (dir[3] == 0) ? vel_rr : -vel_rr;
+
+        Serial.print("测试轮子速度(RPM): "); Serial.print(vel_fl); Serial.print(", ");
+        Serial.print(vel_fr); Serial.print(", ");
+        Serial.print(vel_rl); Serial.print(", "); Serial.println(vel_rr);
+
         // 使用运动学正解计算机器人速度
         float vel_x, vel_y, angular_vel;
         this->forwardKinematics(vel_fl, vel_fr, vel_rl, vel_rr,
@@ -205,7 +210,7 @@ void MecanumKinematics::updateOdometry(uint32_t dt_ms)
             odom_data.pos_y += (vel_x * sin_theta + vel_y * cos_theta) * dt_seconds;
         }
         // count++;
-        // Serial.print("更新次数: ");
+        // Serial.print("更新次数: ");.
         // Serial.println(count);
     }
     // // 调试输出

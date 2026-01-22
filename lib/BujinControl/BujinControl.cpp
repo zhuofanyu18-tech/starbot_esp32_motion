@@ -10,7 +10,7 @@
  */
 void Emm_V5_INIT(void)
 {
-  // 初始化串口2，波特率256000，8数据位，无校验，1停止位，RX引脚GPIO16，TX引脚GPIO17
+  // 初始化串口2，波特率256000，8数据位，无校验，1停止位，RX引脚GPIO18，TX引脚GPIO17
   Serial2.begin(256000, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);  // 115200
   // 清空串口缓冲区
   while(Serial2.available()) Serial2.read();
