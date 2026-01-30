@@ -1,7 +1,7 @@
 #include "MLTrol.h"
+#include <Arduino.h>
+#include "BujinControl.h"
 #include <cmath>
-
-#define SERIAL_DELAY 3
 
 // 里程计结构体的构造函数实现
 OdometryData::OdometryData()
@@ -19,7 +19,7 @@ WheelSpeeds::WheelSpeeds(float fl, float fr, float rl, float rr)
 
 // MecanumKinematics 类的构造函数实现
 MecanumKinematics::MecanumKinematics(float length, float width, float wheel_diameter)
-    : car_len(length), car_wid(width), wheel_radius(wheel_diameter / 2.0f), last_update_time(0) 
+    : car_len(length), car_wid(width), wheel_radius(wheel_diameter / 2.0f)
 {
     resetOdometry();
 }
@@ -72,17 +72,22 @@ void MecanumKinematics::setCarDimensions(float length, float width)
 // 电机初始化
 void MecanumKinematics::MotorInit()
 {
-    // 初始化步进电机-->串口通信 17 18
+    // 初始化步进电机-->串口通信 17 18，同时创建互斥锁和速度队列
     Emm_V5_INIT();
-    Emm_V5_En_Control(0, true, true);
-    // Emm_V5_En_Control(1, true, true); // 步进电机的使能
-    // delay(10);
-    // Emm_V5_En_Control(2, true, true); // 步进电机的使能
-    // delay(10);
-    // Emm_V5_En_Control(3, true, true); // 步进电机的使能
-    // delay(10);
-    // Emm_V5_En_Control(4, true, true); // 步进电机的使能
-    // delay(10);
+    // 电机使能
+    Emm_V5_En_Control(0, true, false);
+    
+    // 创建电机控制任务
+    xTaskCreatePinnedToCore(
+        MotorControlTask,    // 任务函数
+        "MotorCtrlTask",     // 任务名称
+        10240,               // 栈大小（字节）
+        NULL,                // 任务参数
+        2,                   // 任务优先级（高于里程计，低于micro-ROS）
+        NULL,                // 任务句柄
+        1                    // 运行在核心1，和micro-ROS任务错开
+    );
+    delay(100);
 }
 
 // 设置速度 左前1 右前2 左后3 右后4
@@ -106,49 +111,45 @@ void MecanumKinematics::setMotorSpeed(const WheelSpeeds &speeds)
     uint16_t vel_fr = radToRPM(speeds.front_right);
     uint16_t vel_rl = radToRPM(speeds.rear_left);
     uint16_t vel_rr = radToRPM(speeds.rear_right);
-    // Emm_V5_Vel_Control(1, dir[0], vel_fl, 0, true);
-    // Emm_V5_Vel_Control(2, dir[1], vel_fr, 0, true);
-    // Emm_V5_Vel_Control(3, dir[2], vel_rl, 0, true);
-    // Emm_V5_Vel_Control(4, dir[3], vel_rr, 0, true);
-    Emm_5V_Vel_Set(1, dir[0], vel_fl, 0, true);
-    delay(SERIAL_DELAY);
-    Emm_5V_Vel_Set(2, dir[1], vel_fr, 0, true);
-    delay(SERIAL_DELAY);
-    Emm_5V_Vel_Set(3, dir[2], vel_rl, 0, true);
-    delay(SERIAL_DELAY);
-    Emm_5V_Vel_Set(4, dir[3], vel_rr, 0, true);
-    Emm_V5_Synchronous_motion(0);
-    // Emm_V5_Synchronous_motion(2);
-    // Emm_V5_Synchronous_motion(3);
-    // Emm_V5_Synchronous_motion(4);
-    Serial.print("轮子速度(rad/s): ");
-    Serial.print("FL=");
-    Serial.print(vel_fl);
-    Serial.print(", FR=");
-    Serial.print(vel_fr);
-    Serial.print(", RL=");
-    Serial.print(vel_rl);
-    Serial.print(", RR=");
+
+    // 使用异步设置速度
+    Emm_5V_Vel_Set_Async(1, dir[0], vel_fl, 0, false);
+    Emm_5V_Vel_Set_Async(2, dir[1], vel_fr, 0, false);
+    Emm_5V_Vel_Set_Async(3, dir[2], vel_rl, 0, false);
+    Emm_5V_Vel_Set_Async(4, dir[3], vel_rr, 0, false);    
+
+    // // 同步执行所有电机
+    // if(xSemaphoreTake(motor_mutex, pdMS_TO_TICKS(50)) == pdTRUE)
+    // {
+    //     Emm_V5_Synchronous_motion(0);
+    //     Serial.print("duojitongbu");
+    //     xSemaphoreGive(motor_mutex);
+    // }
+
+    Serial.print("轮子速度(RPM): ");
+    Serial.print(vel_fl); Serial.print(", ");
+    Serial.print(vel_fr); Serial.print(", ");
+    Serial.print(vel_rl); Serial.print(", ");
     Serial.println(vel_rr);
 }
 
 void MecanumKinematics::updateOdometry(uint32_t dt_ms)
 {
+    // 将 ms 转化为 s
     float dt_seconds = dt_ms / 1000.0f;
-    // float dt_seconds = 0.01f; // 固定时间步长10ms
-    if (dt_seconds <= 0)
-        return;
-    // 读取当前电机速度（RPM）并转换为弧度/秒(此速度没有方向，只有大小)
-    uint16_t vel_fl_rpm = Emm_V5_MotorVel_Get(1);
-    uint16_t vel_fr_rpm = Emm_V5_MotorVel_Get(2);    
-    uint16_t vel_rl_rpm = Emm_V5_MotorVel_Get(3);
-    uint16_t vel_rr_rpm = Emm_V5_MotorVel_Get(4);
-    // 第一次读取时会有错误
+    
+    if (dt_seconds <= 0) return;
+    // 读取当前电机速度（RPM）并转换为弧度/秒
+    uint16_t vel_fl_rpm = Emm_V5_MotorVel_Get_RTOS(1);
+    uint16_t vel_fr_rpm = Emm_V5_MotorVel_Get_RTOS(2);    
+    uint16_t vel_rl_rpm = Emm_V5_MotorVel_Get_RTOS(3);
+    uint16_t vel_rr_rpm = Emm_V5_MotorVel_Get_RTOS(4);
+
+    // 第一次检测速度可能会出现65535，需要过滤
     if(vel_fl_rpm == 65535) vel_fl_rpm = 0;
     if(vel_fr_rpm == 65535) vel_fr_rpm = 0;
     if(vel_rl_rpm == 65535) vel_rl_rpm = 0;
     if(vel_rr_rpm == 65535) vel_rr_rpm = 0;
-
     if ((abs(vel_fl_rpm) < 1000) && (abs(vel_fr_rpm) < 1000) && (abs(vel_rl_rpm) < 1000) && (abs(vel_rr_rpm) < 1000))
     {
         // 将RPM转换为弧度/秒
@@ -209,24 +210,7 @@ void MecanumKinematics::updateOdometry(uint32_t dt_ms)
             odom_data.pos_x += (vel_x * cos_theta - vel_y * sin_theta) * dt_seconds;
             odom_data.pos_y += (vel_x * sin_theta + vel_y * cos_theta) * dt_seconds;
         }
-        // count++;
-        // Serial.print("更新次数: ");.
-        // Serial.println(count);
     }
-    // // 调试输出
-    // Serial.print("Odometry - X: ");
-    // Serial.print(odom_data.pos_x, 4);
-    // Serial.print(" m, Y: ");
-    // Serial.print(odom_data.pos_y, 4);
-    // Serial.print(" m, Theta: ");
-    // Serial.print(odom_data.orientation * 180.0f / M_PI, 2);
-    // Serial.print("°, Vx: ");
-    // Serial.print(odom_data.linear_vel_x, 4);
-    // Serial.print(" m/s, Vy: ");
-    // Serial.print(odom_data.linear_vel_y, 4);
-    // Serial.print(" m/s, W: ");
-    // Serial.print(odom_data.angular_vel, 4);
-    // Serial.println(" rad/s");
 }
 
 // 重置里程计
@@ -238,7 +222,6 @@ void MecanumKinematics::resetOdometry()
     odom_data.linear_vel_x = 0.0f;
     odom_data.linear_vel_y = 0.0f;
     odom_data.angular_vel = 0.0f;
-    last_update_time = millis();
     Serial.print("里程计已重置");
     Serial.print(odom_data.pos_x);
     Serial.print(", ");

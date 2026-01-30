@@ -39,6 +39,21 @@ rcl_timer_t timer_odom;                // 创建一个定时器，用来定时�
 uint32_t last_odom_time = 0; // 上次发布里程计的时间戳
 uint32_t now_odom_time = 0;
 
+// 定时读取轮子的转速
+void Read_vel(void *pvParameters)
+{
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    // 20 ms -> 50 Hz 更新
+    const uint32_t period_ms = 20; 
+    const TickType_t xPeriod = pdMS_TO_TICKS(period_ms); 
+    
+    for(;;)
+    {
+        vTaskDelayUntil(&xLastWakeTime, xPeriod);
+        kinematics.updateOdometry(period_ms); 
+    }
+}
+
 // 定时发送里程计的回调函数
 void odom_timer_callback(rcl_timer_t *timer, int64_t last_call_time)
 {
@@ -82,6 +97,7 @@ void twist_callback(const void *msg_in)
 
 void micro_ros_task(void *args)
 {
+    Serial.println("ros2开始连接");
     //==============================================================
     // 步骤 1: 设置网络传输
     //==============================================================
@@ -162,6 +178,7 @@ void micro_ros_task(void *args)
         delay(100);                  // 等待100ms后重试
     }
 
+    Serial.println("ros2连接成功");
     //==============================================================
     // 步骤 6: 启动主循环
     //==============================================================
@@ -179,24 +196,39 @@ void setup()
 {
     // 初始化串口（用于调试输出）
     Serial.begin(115200);
-    while (!Serial)
-    {
-    } // 等待串口连接
+    while (!Serial) { } // 等待串口连接
+
     // 初始化电机
+    Serial.println("电机开始初始化");
+    delay(500);
     kinematics.MotorInit();
     Serial.println("电机初始化完成");
-    xTaskCreate(micro_ros_task, "micro_ros", 10240, NULL, 1, NULL);
-    delay(2000);
-    last_odom_time = millis();
+
+    // 创建micro-ROS任务，运行在核心0
+    xTaskCreatePinnedToCore(
+        micro_ros_task, 
+        "micro_ros", 
+        10240, 
+        NULL, 
+        3, 
+        NULL,
+        0
+    );
+
+    xTaskCreatePinnedToCore(
+        Read_vel,
+        "read_vel",
+        10240,
+        NULL,
+        1,
+        NULL,
+        1
+    );
+
+    delay(500);
 }
 
 void loop()
 {
-    // delay(10); // 等待10毫秒
-    now_odom_time = millis();
-    if(now_odom_time - last_odom_time >= 100)
-    {
-        kinematics.updateOdometry(now_odom_time - last_odom_time);
-        last_odom_time = millis();
-    }
+    vTaskDelay(pdMS_TO_TICKS(100));
 }

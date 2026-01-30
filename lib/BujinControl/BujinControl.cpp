@@ -1,19 +1,24 @@
 #include "BujinControl.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
 
-// 新增：串口发送延时（毫秒），根据实际硬件调整
-#define SERIAL_CMD_DELAY 5
-// 新增：最大重试次数
-#define MAX_RETRY_COUNT 1
+// 创建互斥锁和队列
+SemaphoreHandle_t motor_mutex = NULL;
+QueueHandle_t motor_cmd_queue = NULL;
+
 
 /**
  * @brief    步进电机初始化
  */
 void Emm_V5_INIT(void)
 {
-  // 初始化串口2，波特率256000，8数据位，无校验，1停止位，RX引脚GPIO18，TX引脚GPIO17
-  Serial2.begin(256000, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);  // 115200
-  // 清空串口缓冲区
-  while(Serial2.available()) Serial2.read();
+  Serial2.begin(115200, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+  // 创建互斥锁和队列
+  motor_mutex = xSemaphoreCreateMutex();
+  motor_cmd_queue = xQueueCreate(10, sizeof(MotorCmd_t));
+  Serial.println("步进电机初始化完成");
 }
 
 /**
@@ -409,11 +414,9 @@ void Emm_V5_Receive_Data(uint8_t *rxCmd, uint8_t *rxCount)
   
   // 初始化接收计数
   *rxCount = 0;
-  // 清空缓冲区
-  memset(rxCmd, 0, 128);
-
+  
   // 设置最大接收时间为200ms
-  while (millis() - startTime < 100)
+  while (millis() - startTime < 200)
   {
     if (Serial2.available() > 0)
     {
@@ -426,7 +429,7 @@ void Emm_V5_Receive_Data(uint8_t *rxCmd, uint8_t *rxCount)
     else
     {
       // 如果10ms内没有新数据，认为一帧数据接收完成
-      if (millis() - lastDataTime > 5 && i > 0)
+      if (millis() - lastDataTime > 10 && i > 0)
       {
         break;
       }
@@ -447,9 +450,6 @@ float Emm_V5_MotorVel_Get(uint8_t addr)
   uint8_t rxCmd[128] = {0};
   uint8_t rxCount = 0;
   
-  // 清空串口缓冲区
-  while(Serial2.available()) Serial2.read();
-
   // 发送读取速度命令
   Emm_V5_Read_Sys_Params(addr, S_VEL);
   
@@ -481,9 +481,6 @@ void Emm_5V_Vel_Set(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, bool s
   uint8_t rxCmd[128] = {0};
   uint8_t rxCount = 0;
   
-  // 清空串口缓冲区
-  while(Serial2.available()) Serial2.read();
-  
   // 发送速度控制命令
   Emm_V5_Vel_Control(addr, dir, vel, acc, snF);
   // 接收响应数据
@@ -504,5 +501,145 @@ void Emm_5V_Vel_Set(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, bool s
     Emm_V5_Vel_Control(addr, dir, vel, acc, snF);
     // 接收响应数据
     Emm_V5_Receive_Data(rxCmd, &rxCount);
+  }
+}
+
+/**
+ * @brief    RTOS安全的接收数据函数
+ * @param    timeout 获得的时间
+ * @retval   无
+ */
+bool Emm_V5_Receive_Data_NonBlocking(uint8_t *rxCmd, uint8_t *rxCount, TickType_t timeout)
+{
+    int i = 0;
+    *rxCount = 0;
+    
+    // 设置接收超时
+    TickType_t startTime = xTaskGetTickCount();
+    
+    while ((xTaskGetTickCount() - startTime) < timeout)
+    {
+        if (Serial2.available() > 0)
+        {
+            if (i < 128)
+            {
+                rxCmd[i++] = Serial2.read();
+                // 收到数据后重置超时
+                startTime = xTaskGetTickCount();
+            }
+        }
+        else
+        {
+            // 如果10ms内没有新数据，认为一帧数据接收完成
+            if ((xTaskGetTickCount() - startTime) > pdMS_TO_TICKS(10) && i > 0)
+            {
+                break;
+            }
+            taskYIELD(); // 让出CPU给其他任务
+        }
+    }
+    
+    *rxCount = i;
+    return (i > 0);
+}
+
+/**
+ * @brief    获取电机实时(每分钟)转速: (RTOS版本)
+ * @param    addr：电机地址
+ * @retval   vel 每分钟转速
+ */
+float Emm_V5_MotorVel_Get_RTOS(uint8_t addr)
+{
+  float vel = -1.0f; // 使用负数表示获取失败
+  uint8_t rxCmd[128] = {0};
+  uint8_t rxCount = 0;
+  
+  // 获取互斥锁，保护串口权限
+  if(xSemaphoreTake(motor_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+  {
+    // 发送读取速度命令
+    Emm_V5_Read_Sys_Params(addr, S_VEL);
+    
+    // 接收速度数据
+    if(Emm_V5_Receive_Data_NonBlocking(rxCmd, &rxCount, pdMS_TO_TICKS(100)))
+    {
+      // 验证数据有效性
+      if (rxCount == 6 && rxCmd[0] == addr && rxCmd[1] == 0x35)
+      {
+        // 正确解析速度数据
+        vel = static_cast<float>((static_cast<uint16_t>(rxCmd[3]) << 8) | 
+                                 static_cast<uint16_t>(rxCmd[4]));
+      }
+    }
+    
+    // 释放互斥锁
+    xSemaphoreGive(motor_mutex);
+  }
+  
+  return vel;
+}
+
+/**
+ * @brief    电机控制任务（在独立的任务中执行）,如果队列有任务,则执行任务,否则阻塞等待
+ */
+void MotorControlTask(void *pvParameters)
+{
+    MotorCmd_t cmd;
+    
+    for (;;)
+    {
+        // 从队列中获取命令（阻塞等待）
+        // 0：立刻返回pdFALSE;  portMAX_DELAY：阻塞等待直到有数据，期间不占用CPU资源
+        if (xQueueReceive(motor_cmd_queue, &cmd, portMAX_DELAY) == pdTRUE)
+        {
+            // 获取互斥锁保护串口
+            if (xSemaphoreTake(motor_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+            {
+                uint8_t rxCmd[128] = {0};
+                uint8_t rxCount = 0;
+                
+                // 发送速度控制命令
+                Emm_V5_Vel_Control(cmd.addr, cmd.dir, cmd.vel, cmd.acc, cmd.snF);
+                // cmd.vel 为无符号整数，使用 %u 并强制转换以避免 printf 格式错误
+                Serial.printf("电机速度: %u, 多机同步：%d\n", (unsigned)cmd.vel, (int)cmd.snF);
+
+                // 非阻塞接收响应
+                if (Emm_V5_Receive_Data_NonBlocking(rxCmd, &rxCount, pdMS_TO_TICKS(50)))
+                {
+                    if (rxCount > 0 && rxCmd[rxCount - 1] == 0x6B)
+                    {
+                        // 命令执行成功
+                        Serial.printf("电机地址 %d 速度设置成功\n", cmd.addr);
+                    }
+                }
+                
+                // if(cmd.addr == 4)
+                // {
+                //   Emm_V5_Synchronous_motion(0);
+                //   Serial.println("duojitongbu");
+                // }
+
+                // 释放互斥锁
+                xSemaphoreGive(motor_mutex);
+            }
+            
+            // 让出CPU，避免任务饥饿
+            taskYIELD();
+        }
+    }
+}
+
+
+/**
+ * @brief    异步设置电机速度（非阻塞）
+ */
+void Emm_5V_Vel_Set_Async(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, bool snF)
+{
+  MotorCmd_t cmd = {addr, dir, vel, acc, snF};
+    
+  // 发送命令到队列（如果队列满则等待10ms）
+  if (xQueueSend(motor_cmd_queue, &cmd, pdMS_TO_TICKS(10)) != pdTRUE)
+  {
+    Serial.printf("警告: 电机命令队列已满，地址: %d\n", addr);
   }
 }

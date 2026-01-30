@@ -40,7 +40,6 @@ private:
     float car_wid;      // 车子的宽度 (轮子的左右距离)
     float wheel_radius; // 轮子的半径
     OdometryData odom_data;  // 里程计数据
-    uint32_t last_update_time; // 上次更新时间 (ms)
     uint8_t dir[4] = {0}; // 方向数组（0正转，1反转）
 
 public:

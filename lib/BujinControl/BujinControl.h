@@ -1,20 +1,27 @@
 #ifndef __BUJIN_CONTROL_H__
 #define __BUJIN_CONTROL_H__
-// #define Serial2 MOTOR_BUS
-/**********************************************************
-*** Emm_V5.0步进闭环控制例程
-*** 编写作者：ZHANGDATOU
-*** 技术支持：张大头闭环伺服
-*** 淘宝店铺：https://zhangdatou.taobao.com
-*** CSDN博客：http s://blog.csdn.net/zhangdatou666
-*** qq交流群：262438510
-**********************************************************/
 
-// 注意：串口和USB下载口共用串口（0,1），USB上传程序时，先拔掉串口线.
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
 #define ABS(x) ((x) > 0 ? (x) : -(x))
 #define UART_TX_PIN 17 // ESP32发送引脚 (GPIO17)
 #define UART_RX_PIN 18 // ESP32接收引脚 (GPIO18)
+
+extern SemaphoreHandle_t motor_mutex;
+extern QueueHandle_t motor_cmd_queue;
+
+// 创建电机队列结构体
+typedef struct
+{
+  uint8_t addr;  // ID地址
+  uint8_t dir;   // 方向
+  uint16_t vel;  // 转速
+  uint8_t acc;   // 加速度
+  bool snF;      // 多机同步
+} MotorCmd_t;
 
 typedef enum
 {
@@ -54,5 +61,10 @@ void Emm_V5_Origin_Interrupt(uint8_t addr);                                     
 void Emm_V5_Receive_Data(uint8_t *rxCmd, uint8_t *rxCount);                                                                                                                         // 返回数据接收函数
 float Emm_V5_MotorVel_Get(uint8_t addr);
 void Emm_5V_Vel_Set(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, bool snF);                                                                                                                                                 // 获取电机实时(每分钟)转速
-
+// @brief    RTOS安全的接收数据函数
+bool Emm_V5_Receive_Data_NonBlocking(uint8_t *rxCmd, uint8_t *rxCount, TickType_t timeout);
+// @brief    获取电机实时(每分钟)转速: (RTOS版本)
+float Emm_V5_MotorVel_Get_RTOS(uint8_t addr);
+void MotorControlTask(void *pvParameters);
+void Emm_5V_Vel_Set_Async(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, bool snF);
 #endif
