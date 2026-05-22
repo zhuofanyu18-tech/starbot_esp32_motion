@@ -32,6 +32,17 @@ struct WheelSpeeds
     WheelSpeeds(float fl, float fr, float rl, float rr);
 };
 
+// 用来储存速度
+struct SharedSpeed {
+    float vel_fl;  // 左前轮速度
+    float vel_fr;  // 右前轮速度
+    float vel_rl;  // 左后轮速度
+    float vel_rr;  // 右后轮速度
+
+    SharedSpeed();
+    SharedSpeed(float fl, float fr, float rl, float rr);
+};
+
 class MecanumKinematics
 {
 
@@ -65,7 +76,7 @@ public:
     void setMotorSpeed(const WheelSpeeds& speeds);
 
     // 读取当前电机速度并更新里程计
-    void updateOdometry(uint32_t dt_ms);
+    void updateOdometry(uint32_t dt_ms, float vel_fl_rpm, float vel_fr_rpm, float vel_rl_rpm, float vel_rr_rpm);
 
     // 获取里程计数据
     const OdometryData& getOdometryData() const;

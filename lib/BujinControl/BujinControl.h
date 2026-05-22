@@ -7,8 +7,8 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #define ABS(x) ((x) > 0 ? (x) : -(x))
-#define UART_TX_PIN 17 // ESP32发送引脚 (GPIO17)
-#define UART_RX_PIN 18 // ESP32接收引脚 (GPIO18)
+#define UART_TX_PIN 17 // ESP32步进电机发送引脚
+#define UART_RX_PIN 18 // ESP32步进电机接收引脚
 
 extern SemaphoreHandle_t motor_mutex;
 extern QueueHandle_t motor_cmd_queue;

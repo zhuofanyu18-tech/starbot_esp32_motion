@@ -13,12 +13,12 @@ QueueHandle_t motor_cmd_queue = NULL;
  * @brief    步进电机初始化
  */
 void Emm_V5_INIT(void)
-{
+{               
   Serial2.begin(115200, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
   // 创建互斥锁和队列
   motor_mutex = xSemaphoreCreateMutex();
-  motor_cmd_queue = xQueueCreate(10, sizeof(MotorCmd_t));
-  Serial.println("步进电机初始化完成");
+  motor_cmd_queue = xQueueCreate(50, sizeof(MotorCmd_t));
+  // Serial.println("步进电机初始化完成");
 }
 
 /**
@@ -284,6 +284,9 @@ void Emm_V5_Synchronous_motion(uint8_t addr)
 {
   uint8_t cmd[16] = {0};
 
+  uint8_t rxCmd[128] = {0};
+  uint8_t rxCount = 0;
+  
   // 装载命令
   cmd[0] = addr; // 地址
   cmd[1] = 0xFF; // 功能码
@@ -292,6 +295,8 @@ void Emm_V5_Synchronous_motion(uint8_t addr)
 
   // 发送命令
   Serial2.write(cmd, 4);
+  // 接收速度数据
+  Emm_V5_Receive_Data(rxCmd, &rxCount);
 }
 
 /**
@@ -476,32 +481,48 @@ float Emm_V5_MotorVel_Get(uint8_t addr)
  * @param    snF ：多机同步标志，false为不启用，true为启用
  * @retval   无
  */
+
 void Emm_5V_Vel_Set(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, bool snF)
 {
   uint8_t rxCmd[128] = {0};
   uint8_t rxCount = 0;
-  
-  // 发送速度控制命令
-  Emm_V5_Vel_Control(addr, dir, vel, acc, snF);
-  // 接收响应数据
-  Emm_V5_Receive_Data(rxCmd, &rxCount);
-  
-  // 增加 rxCount 有效性检查，防止数组越界
-  if (rxCount > 0 && rxCmd[rxCount - 1] == 0x6B)
+  // // 发送速度控制命令
+  // Emm_V5_Vel_Control(addr, dir, vel, acc, snF);
+  // // 接收响应数据
+  // Emm_V5_Receive_Data(rxCmd, &rxCount);
+    
+  // // 增加 rxCount 有效性检查，防止数组越界
+  // if (rxCount > 0 && rxCmd[rxCount - 1] == 0x6B)
+  // {
+  //   Serial.println("电机addr速度设置成功"); // 命令执行成功
+  // }
+
+  if(xSemaphoreTake(motor_mutex, pdMS_TO_TICKS(20)) == pdTRUE)
   {
-    Serial.println("电机addr速度设置成功"); // 命令执行成功
-  }
-  
-  else
-  {
-    // 失败 ，打印错误信息
-    Serial.print("命令执行失败，电机地址: ");
-    Serial.println(addr);
-    // 再次发送速度控制命令
+    // 发送速度控制命令
     Emm_V5_Vel_Control(addr, dir, vel, acc, snF);
     // 接收响应数据
     Emm_V5_Receive_Data(rxCmd, &rxCount);
+    
+    // 增加 rxCount 有效性检查，防止数组越界
+    if (rxCount > 0 && rxCmd[rxCount - 1] == 0x6B)
+    {
+      // Serial.println("电机addr速度设置成功"); // 命令执行成功
+    }
+    
+    // 释放互斥锁
+    xSemaphoreGive(motor_mutex);
   }
+    // else
+    // {
+    //   // 失败 ，打印错误信息
+    //   Serial.print("命令执行失败，电机地址: ");
+    //   Serial.println(addr);
+    //   // 再次发送速度控制命令
+    //   Emm_V5_Vel_Control(addr, dir, vel, acc, snF);
+    //   // 接收响应数据
+    //   Emm_V5_Receive_Data(rxCmd, &rxCount);
+    // }
 }
 
 /**
@@ -555,13 +576,13 @@ float Emm_V5_MotorVel_Get_RTOS(uint8_t addr)
   uint8_t rxCount = 0;
   
   // 获取互斥锁，保护串口权限
-  if(xSemaphoreTake(motor_mutex, pdMS_TO_TICKS(100)) == pdTRUE)
+  if(xSemaphoreTake(motor_mutex, pdMS_TO_TICKS(10)) == pdTRUE)
   {
     // 发送读取速度命令
     Emm_V5_Read_Sys_Params(addr, S_VEL);
     
     // 接收速度数据
-    if(Emm_V5_Receive_Data_NonBlocking(rxCmd, &rxCount, pdMS_TO_TICKS(100)))
+    if(Emm_V5_Receive_Data_NonBlocking(rxCmd, &rxCount, pdMS_TO_TICKS(10)))
     {
       // 验证数据有效性
       if (rxCount == 6 && rxCmd[0] == addr && rxCmd[1] == 0x35)
@@ -601,7 +622,7 @@ void MotorControlTask(void *pvParameters)
                 // 发送速度控制命令
                 Emm_V5_Vel_Control(cmd.addr, cmd.dir, cmd.vel, cmd.acc, cmd.snF);
                 // cmd.vel 为无符号整数，使用 %u 并强制转换以避免 printf 格式错误
-                Serial.printf("电机速度: %u, 多机同步：%d\n", (unsigned)cmd.vel, (int)cmd.snF);
+                // Serial.printf("电机速度: %u, 多机同步：%d\n", (unsigned)cmd.vel, (int)cmd.snF);
 
                 // 非阻塞接收响应
                 if (Emm_V5_Receive_Data_NonBlocking(rxCmd, &rxCount, pdMS_TO_TICKS(50)))
@@ -609,7 +630,7 @@ void MotorControlTask(void *pvParameters)
                     if (rxCount > 0 && rxCmd[rxCount - 1] == 0x6B)
                     {
                         // 命令执行成功
-                        Serial.printf("电机地址 %d 速度设置成功\n", cmd.addr);
+                        // Serial.printf("电机地址 %d 速度设置成功\n", cmd.addr);
                     }
                 }
                 
@@ -640,6 +661,6 @@ void Emm_5V_Vel_Set_Async(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, 
   // 发送命令到队列（如果队列满则等待10ms）
   if (xQueueSend(motor_cmd_queue, &cmd, pdMS_TO_TICKS(10)) != pdTRUE)
   {
-    Serial.printf("警告: 电机命令队列已满，地址: %d\n", addr);
+    // Serial.printf("警告: 电机命令队列已满，地址: %d\n", addr);
   }
 }

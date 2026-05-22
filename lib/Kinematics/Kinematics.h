@@ -1,44 +1,76 @@
 #ifndef __KINEMATICS_H__
 #define __KINEMATICS_H__
 
-#include <Arduino.h>
+#include "Arduino.h"
+#include <cmath>
 
-// 轮子速度结构体
-struct WheelSpeeds
+// 运动学正逆解：已知当前速度 --> 求小车 w 和 v
+// 已知目标的 w 和 v --> 两轮子输出速度
+
+/*
+    1. 需要确定设置的变量
+    一同设置：
+        轮子距离  wheel_distance
+        上次更新的时间 --> last_update_time
+        时间的差值  -->  dt = millis() - last_update_time
+    两个轮子分别设置：
+        每一次脉冲对应的轮子前进距离  per_pulse_distance
+        编码器的差值  -->  dtick = encoders[0].getTicks - last_encoder_tick
+        对应的每个轮子的速度  motor_speed = dtick * per_pulse_distance / dt * 1000 --> mm/s
+    2.确定所需构造函数
+        设置电动机参数
+        设置轮子间距
+        运动学正逆解
+*/
+
+// 创建电机参数结构体
+typedef struct
 {
-    float front_left;  // 左前轮
-    float front_right; // 右前轮
-    float rear_left;   // 左后轮
-    float rear_right;  // 右后轮
+    float per_pulse_distance;  // 每次脉冲所对应的距离
+    float motor_speed;         // 轮子的速度，通过脉冲差值计算
+    int32_t last_encoder_tick; // 上一次的脉冲总量， 用来算脉冲差值
+} motor_param_t;
 
-    // 构造函数
-    WheelSpeeds();
-    WheelSpeeds(float fl, float fr, float rl, float rr);
-};
-
-class MecanumKinematics
+// 创建里程计结构体
+typedef struct
 {
-private:
-    float car_len;      // 车子的长度 (轮子的前后距离)
-    float car_wid;      // 车子的宽度 (轮子的左右距离)
-    float wheel_radius; // 轮子的半径
+    float x;
+    float y;
+    float angle;
+    float linear_speed;
+    float angle_speed;
+} odom_t;
 
+class Kinematics
+{
 public:
-    // 构造函数，自动设置车子的配置
-    MecanumKinematics(float length, float width, float wheel_diameter);
+    Kinematics() = default;
+    ~Kinematics() = default;
 
-    // 运动学逆解：将机器人速度转换为轮子速度
-    WheelSpeeds inverseKinematics(float vel_x, float vel_y, float angular_vel) const;
+    // 设置结构体中电动机参数-->每一次脉冲对应的轮子前进距离
+    void set_motor_param(uint8_t id, float per_pulse_distance);
+    // 设置轮子间距
+    void set_wheel_distance(float wheel_distance);
+    // 更新电动机的速度
+    void update_motor_speed(uint64_t current_time, int32_t front_left_tick, int32_t front_right_tick, int32_t rear_left_tick, int32_t rear_right_tick);
+    // 获取电机速度
+    float get_motor_speed(uint8_t id);
+    // 获取最后一次编码器的数值
+    int64_t get_last_ticks(uint8_t id);
+    // 正运动学计算
+    void kinematics_forward(float front_left_speed, float front_right_speed, float rear_left_speed, float rear_right_speed, float &out_linear_speed, float &out_angle_speed);
+    // 逆运动学计算-->由线速度和角速度推出左右轮子motor_speed
+    void kinematics_inverse(float linear_speed, float angle_speed, float &out_front_left_speed, float &out_front_right_speed, float &out_rear_left_speed, float &out_rear_right_speed);
 
-    // 运动学正解：将轮子速度转换为机器人速度
-    void forwardKinematics(const WheelSpeeds &wheel_speeds,
-                           float &vel_x, float &vel_y, float &angular_vel) const;
+    void update_odom(uint16_t dt);
+    odom_t &get_odom();
+    static void TransAngleInPI(float angle, float &out_angle);
 
-    // 设置轮子半径
-    void setWheelRadius(float radius);
-
-    // 设置车辆尺寸
-    void setCarDimensions(float length, float width);
+private:
+    motor_param_t motor_param_[4];
+    uint64_t last_update_time = 0;
+    float wheel_distance_;
+    odom_t odom_;
 };
 
 #endif
