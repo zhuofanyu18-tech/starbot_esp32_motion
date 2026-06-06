@@ -61,8 +61,11 @@ void StepperMotorApp::initMotors() {
         Emm_V5_Receive_Data(rxCmd, &rxCount);
     }
 
-    // 上电后自动触发碰撞回零
-    startHoming();
+    // 根据配置决定是否自动回零
+    if (app_config::kEnableAutoHoming) {
+        homed_ = false;
+        startHomingBuiltin(0);
+    }
 }
 
 void StepperMotorApp::begin(
@@ -91,43 +94,66 @@ void StepperMotorApp::begin(
     stopOnError(rclc_executor_add_timer(&executor, &timer_status_));
 }
 
-void StepperMotorApp::startHoming() {
+void StepperMotorApp::startHomingBuiltin(size_t motor_index) {
     if (xSemaphoreTake(motor_mutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
 
-    uint8_t addr = kMotorIds[homing_motor_index_];
+    uint8_t addr = kMotorIds[motor_index];
 
     // 清空串口缓冲区
     while (Serial2.available()) Serial2.read();
 
-    // 停止残留运动 + 清除堵转保护
-    Emm_V5_Stop_Now(addr, false);
     uint8_t rxCmd[128] = {0};
     uint8_t rxCount = 0;
+
+    // 停止残留运动
+    Emm_V5_Stop_Now(addr, false);
     Emm_V5_Receive_Data(rxCmd, &rxCount);
     vTaskDelay(pdMS_TO_TICKS(10));
 
+    // 清除堵转保护
     Emm_V5_Reset_Clog_Pro(addr);
     Emm_V5_Receive_Data(rxCmd, &rxCount);
+    vTaskDelay(pdMS_TO_TICKS(5));
 
-    // 发送慢速反转指令 (dir=1=CCW)，持续反转直到堵转
-    Emm_V5_Vel_Control(addr, 1, app_config::kHomingVelocityRpm, 5, false);
+    // 配置内置碰撞回零参数 (mode 2: 多圈无限位碰撞回零, dir=1=CCW)
+    Emm_V5_Origin_Modify_Params(
+        addr,
+        false,                                   // svF: 不存储到 EEPROM
+        2,                                       // o_mode: 多圈无限位碰撞回零
+        1,                                       // o_dir: CCW
+        app_config::kHomingVelocityRpm,           // o_vel
+        app_config::kHomingTimeoutMs,             // o_tm
+        app_config::kHomingCollisionVelRpm,       // sl_vel
+        app_config::kHomingCollisionCurrentMa,    // sl_ma
+        app_config::kHomingCollisionTimeMs,       // sl_ms
+        false                                    // potF: 不启用上电自动触发
+    );
+    Emm_V5_Receive_Data(rxCmd, &rxCount);
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+    // 触发回零
+    Emm_V5_Origin_Trigger_Return(addr, 2, false);
     Emm_V5_Receive_Data(rxCmd, &rxCount);
 
     xSemaphoreGive(motor_mutex);
 
     homing_ = true;
+    homing_motor_index_ = motor_index;
     homing_check_ms_ = millis();
-    current_positions_[homing_motor_index_] = 0;
+    homing_start_ms_[motor_index] = millis();
+    homing_retry_count_ = 0;
+    current_positions_[motor_index] = 0;
 }
 
-bool StepperMotorApp::pollHomingDone() {
-    if (xSemaphoreTake(motor_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+int8_t StepperMotorApp::pollHomingBuiltinStatus() {
+    // 返回 S_ORG: 0=完成, 1=进行中, 2=失败, -1=通信错误
+    if (xSemaphoreTake(motor_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return -1;
 
     uint8_t addr = kMotorIds[homing_motor_index_];
-    float vel = Emm_V5_MotorVel_Get(addr);
-    bool stalled = (vel >= 0.0f && vel < app_config::kHomingStallSpeedThreshold);
+    int8_t status = Emm_V5_Origin_Status_Get(addr);
 
-    if (stalled) {
+    // 回零成功：执行清理
+    if (status == 0) {
         uint8_t rxCmd[128] = {0};
         uint8_t rxCount = 0;
 
@@ -142,22 +168,70 @@ bool StepperMotorApp::pollHomingDone() {
     }
 
     xSemaphoreGive(motor_mutex);
-    return stalled;
+    return status;
+}
+
+void StepperMotorApp::advanceToNextMotor() {
+    homing_retry_count_ = 0;
+    homing_motor_index_++;
+    if (homing_motor_index_ >= kMotorCount) {
+        homed_ = true;
+        homing_ = false;
+    } else {
+        startHomingBuiltin(homing_motor_index_);
+    }
 }
 
 void StepperMotorApp::update() {
-    // 回零期间逐一轮询，不处理运动指令
+    // 回零期间轮询 S_ORG 状态，不处理运动指令
     if (homing_ && !homed_) {
         if (millis() - homing_check_ms_ >= app_config::kHomingPollIntervalMs) {
             homing_check_ms_ = millis();
-            if (pollHomingDone()) {
-                homing_motor_index_++;
-                if (homing_motor_index_ >= kMotorCount) {
-                    homed_ = true;
-                    homing_ = false;
-                } else {
-                    startHoming();  // 开始回零下一个电机
+
+            size_t idx = homing_motor_index_;
+
+            // 超时检查
+            if (millis() - homing_start_ms_[idx] > app_config::kHomingTimeoutMs) {
+                if (xSemaphoreTake(motor_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    Emm_V5_Origin_Interrupt(kMotorIds[idx]);
+                    uint8_t rxCmd[128] = {0};
+                    uint8_t rxCount = 0;
+                    Emm_V5_Receive_Data(rxCmd, &rxCount);
+                    xSemaphoreGive(motor_mutex);
                 }
+                if (++homing_retry_count_ <= kMaxHomingRetries) {
+                    startHomingBuiltin(idx);
+                } else {
+                    advanceToNextMotor();
+                }
+                return;
+            }
+
+            int8_t s = pollHomingBuiltinStatus();
+
+            switch (s) {
+            case 0:  // 回零完成 → 下一个电机
+                advanceToNextMotor();
+                break;
+            case 1:  // 进行中 → 继续等待
+                break;
+            case 2:  // 回零失败 → 重试
+                if (++homing_retry_count_ <= kMaxHomingRetries) {
+                    if (xSemaphoreTake(motor_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                        Emm_V5_Origin_Interrupt(kMotorIds[idx]);
+                        uint8_t rxCmd[128] = {0};
+                        uint8_t rxCount = 0;
+                        Emm_V5_Receive_Data(rxCmd, &rxCount);
+                        xSemaphoreGive(motor_mutex);
+                    }
+                    startHomingBuiltin(idx);
+                } else {
+                    advanceToNextMotor();
+                }
+                break;
+            case -1:  // 通信错误 → 静默等待下次轮询
+            default:
+                break;
             }
         }
         return;
@@ -215,11 +289,12 @@ void StepperMotorApp::processPendingCommands() {
 }
 
 void StepperMotorApp::publishStatus() {
-    if (!homed_) {
-        // 未回零完成时发布 -1.0 表示未就绪
-        msg_status_.data.data[0] = -1.0f;
-    } else {
-        for (size_t i = 0; i < kMotorCount; ++i) {
+    for (size_t i = 0; i < kMotorCount; ++i) {
+        if (homing_ && i == homing_motor_index_) {
+            msg_status_.data.data[i] = -2.0f;  // 正在回零
+        } else if (!homed_ && i >= homing_motor_index_) {
+            msg_status_.data.data[i] = -1.0f;  // 等待回零
+        } else {
             msg_status_.data.data[i] = current_positions_[i];
         }
     }

@@ -41,7 +41,7 @@ void setup() {
         ImuApp::kExecutorHandles + StepperMotorApp::kExecutorHandles;
     rclc_executor_init(&executor_, &support_.context, kHandles, &allocator_);
 
-    car_app_.begin(support_, node_, executor_);
+    // car_app_.begin(support_, node_, executor_);
     // arm_app_.begin(support_, node_, executor_);  // 机械臂已禁用
     // imu_app_.begin(support_, node_, executor_);
     stepper_app_.begin(support_, node_, executor_);
@@ -55,7 +55,7 @@ void setup() {
 void loop() {
     rclc_executor_spin_some(&executor_, RCL_MS_TO_NS(app_config::kExecutorSpinPeriodMs));
     // arm_app_.update();  // 机械臂已禁用
-    car_app_.update();
+    // car_app_.update();
     // imu_app_.update();
     stepper_app_.update();
     delay(1);

@@ -7,8 +7,8 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #define ABS(x) ((x) > 0 ? (x) : -(x))
-#define UART_TX_PIN 17 // ESP32步进电机发送引脚
-#define UART_RX_PIN 18 // ESP32步进电机接收引脚
+#define UART_TX_PIN 18 // ESP32步进电机发送引脚
+#define UART_RX_PIN 17 // ESP32步进电机接收引脚
 
 extern SemaphoreHandle_t motor_mutex;
 extern QueueHandle_t motor_cmd_queue;
@@ -65,6 +65,7 @@ void Emm_5V_Vel_Set(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, bool s
 bool Emm_V5_Receive_Data_NonBlocking(uint8_t *rxCmd, uint8_t *rxCount, TickType_t timeout);
 // @brief    获取电机实时(每分钟)转速: (RTOS版本)
 float Emm_V5_MotorVel_Get_RTOS(uint8_t addr);
+int8_t Emm_V5_Origin_Status_Get(uint8_t addr);
 void MotorControlTask(void *pvParameters);
 void Emm_5V_Vel_Set_Async(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, bool snF);
 #endif

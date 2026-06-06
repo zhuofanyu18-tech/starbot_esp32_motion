@@ -657,10 +657,28 @@ void MotorControlTask(void *pvParameters)
 void Emm_5V_Vel_Set_Async(uint8_t addr, uint8_t dir, uint16_t vel, uint8_t acc, bool snF)
 {
   MotorCmd_t cmd = {addr, dir, vel, acc, snF};
-    
+
   // 发送命令到队列（如果队列满则等待10ms）
   if (xQueueSend(motor_cmd_queue, &cmd, pdMS_TO_TICKS(10)) != pdTRUE)
   {
     // Serial.printf("警告: 电机命令队列已满，地址: %d\n", addr);
   }
+}
+
+int8_t Emm_V5_Origin_Status_Get(uint8_t addr)
+{
+  int8_t status = -1;
+  uint8_t rxCmd[128] = {0};
+  uint8_t rxCount = 0;
+
+  Emm_V5_Read_Sys_Params(addr, S_ORG);
+  Emm_V5_Receive_Data(rxCmd, &rxCount);
+
+  // 响应格式: [addr, 0x3B, org_status, 0x6B]
+  if (rxCount >= 4 && rxCmd[0] == addr && rxCmd[1] == 0x3B)
+  {
+    status = (int8_t)rxCmd[2];  // 0=完成/空闲, 1=进行中, 2=失败
+  }
+
+  return status;
 }

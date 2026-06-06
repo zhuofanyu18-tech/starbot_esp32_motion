@@ -67,11 +67,14 @@ static constexpr uint32_t kStepperPulsesPerRevolution = 3200;     // 根据驱�
 static constexpr uint16_t kStepperDefaultVelocityRpm = 60;
 static constexpr uint8_t  kStepperDefaultAcceleration = 30;
 
-// 手动碰撞回零参数
-static constexpr uint16_t kHomingVelocityRpm = 15;          // 回零速度 RPM（很慢，防撞坏结构）
-static constexpr uint32_t kHomingTimeoutMs = 30000;         // 回零超时 30s
-static constexpr uint32_t kHomingPollIntervalMs = 200;      // 回零状态轮询间隔
-static constexpr float    kHomingStallSpeedThreshold = 5.0f; // 低于此速度(RPM)判定为堵转
+// ---- 步进电机 回零控制 ----
+    static constexpr bool    kEnableAutoHoming = false;          // 上电自动回零开关 (false=跳过回零)
+    static constexpr uint16_t kHomingCollisionCurrentMa = 200;   // 碰撞检测电流阈值 mA
+    static constexpr uint16_t kHomingCollisionVelRpm = 15;       // 碰撞检测阶段速度 RPM
+    static constexpr uint16_t kHomingCollisionTimeMs = 100;      // 碰撞检测持续时间 ms
+    static constexpr uint16_t kHomingVelocityRpm = 15;           // 回零接近速度 RPM
+    static constexpr uint32_t kHomingTimeoutMs = 30000;          // 回零超时 30s
+    static constexpr uint32_t kHomingPollIntervalMs = 200;       // S_ORG 状态轮询间隔
 
 }  // namespace app_config
 

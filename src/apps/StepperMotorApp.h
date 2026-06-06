@@ -44,15 +44,19 @@ private:
     float        current_positions_[kMotorCount] = {};
     float        target_turns_[kMotorCount] = {};
     bool         motors_enabled_ = false;
-    bool         homed_ = false;
+    bool         homed_ = true;
     bool         homing_ = false;
     size_t       homing_motor_index_ = 0;
     uint32_t     homing_check_ms_ = 0;
+    uint32_t     homing_start_ms_[kMotorCount] = {0};
+    uint8_t      homing_retry_count_ = 0;
+    static constexpr uint8_t kMaxHomingRetries = 3;
 
     void allocateMessageMemory();
     void initMotors();
-    void startHoming();
-    bool pollHomingDone();
+    void startHomingBuiltin(size_t motor_index);
+    int8_t pollHomingBuiltinStatus();
+    void advanceToNextMotor();
     void processPendingCommands();
     void publishStatus();
 
