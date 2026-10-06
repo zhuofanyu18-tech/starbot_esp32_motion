@@ -427,11 +427,12 @@ void Emm_V5_Receive_Data(uint8_t *rxCmd, uint8_t *rxCount)
   {
     if (Serial2.available() > 0)
     {
-      if (i < 128) // 防止数组溢出
+      uint8_t byte = Serial2.read();
+      if (i < 128) // 防止数组溢出，超出部分读出丢弃
       {
-        rxCmd[i++] = Serial2.read();
-        lastDataTime = millis();
+        rxCmd[i++] = byte;
       }
+      lastDataTime = millis();
     }
     else
     {
@@ -440,6 +441,8 @@ void Emm_V5_Receive_Data(uint8_t *rxCmd, uint8_t *rxCount)
       {
         break;
       }
+      // 没有数据时让出 CPU 1ms，避免空转占满 CPU 阻塞同核的其他任务
+      vTaskDelay(1);
     }
   }
   
@@ -544,12 +547,13 @@ bool Emm_V5_Receive_Data_NonBlocking(uint8_t *rxCmd, uint8_t *rxCount, TickType_
     {
         if (Serial2.available() > 0)
         {
+            uint8_t byte = Serial2.read();
             if (i < 128)
             {
-                rxCmd[i++] = Serial2.read();
-                // 收到数据后重置超时
-                startTime = xTaskGetTickCount();
+                rxCmd[i++] = byte;
             }
+            // 收到数据后重置超时
+            startTime = xTaskGetTickCount();
         }
         else
         {
@@ -558,7 +562,8 @@ bool Emm_V5_Receive_Data_NonBlocking(uint8_t *rxCmd, uint8_t *rxCount, TickType_
             {
                 break;
             }
-            taskYIELD(); // 让出CPU给其他任务
+            // 让出 CPU 1ms（taskYIELD 只让给同优先级任务，低优先级任务仍会被饿死）
+            vTaskDelay(1);
         }
     }
     

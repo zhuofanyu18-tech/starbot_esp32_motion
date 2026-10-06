@@ -51,8 +51,8 @@ public:
     void set_motor_param(uint8_t id, float per_pulse_distance);
     // 设置轮子间距
     void set_wheel_distance(float wheel_distance);
-    // 更新电动机的速度
-    void update_motor_speed(uint64_t current_time, int32_t front_left_tick, int32_t front_right_tick, int32_t rear_left_tick, int32_t rear_right_tick);
+    // 更新电动机的速度，current_time_us 单位为微秒（esp_timer_get_time()）
+    void update_motor_speed(uint64_t current_time_us, int32_t front_left_tick, int32_t front_right_tick, int32_t rear_left_tick, int32_t rear_right_tick);
     // 获取电机速度
     float get_motor_speed(uint8_t id);
     // 获取最后一次编码器的数值
@@ -62,7 +62,7 @@ public:
     // 逆运动学计算-->由线速度和角速度推出左右轮子motor_speed
     void kinematics_inverse(float linear_speed, float angle_speed, float &out_front_left_speed, float &out_front_right_speed, float &out_rear_left_speed, float &out_rear_right_speed);
 
-    void update_odom(uint16_t dt);
+    void update_odom(float dt_s);
     odom_t &get_odom();
     static void TransAngleInPI(float angle, float &out_angle);
 

@@ -130,8 +130,17 @@ void updateRosConnection() {
 
 } // namespace
 
+/*
+    任务分配（详见 AppConfig.h）
+    核 1：car_ctrl(10) 底盘控制 10ms  >  loopTask(5) micro-ROS  >  stepper(3) 步进电机串口
+    核 0：WiFi 协议栈(系统)  >  httpd(5) 网页  >  rgb_led(2)  >  oled(1)
+    loop() 中只保留 micro-ROS 相关逻辑，所有可能阻塞的硬件操作都在各自的任务中进行
+*/
 void setup() {
-    Serial.begin(app_config::kDebugSerialBaudrate);
+    // 缓冲区必须在 begin() 之前设置
+    Serial.setRxBufferSize(app_config::kMicroRosRxBufferSize);
+    Serial.setTxBufferSize(app_config::kMicroRosTxBufferSize);
+    Serial.begin(app_config::kMicroRosBaudrate);
     set_microros_serial_transports(Serial);
 
     // I2C 总线只在这里初始化一次，IMU 与 OLED 共用
@@ -150,15 +159,18 @@ void setup() {
 
     oled_app_.begin(car_app_, wifi_app_);
     setAgentState(RosAgentState::kWaitingAgent);
+
+    // 提高 loopTask 优先级（默认 1），保证 micro-ROS 优先于步进电机和显示
+    vTaskPrioritySet(nullptr, app_config::kRosTaskPriority);
+    // loopTask 加入任务看门狗：loop() 卡住超过 5s 自动复位
+    enableLoopWDT();
 }
 
 void loop() {
     updateRosConnection();
 
-    // 各 App 的本地逻辑不依赖 ROS 连接（OLED 断线时也能看到实时速度）
+    // 底盘控制、步进电机、OLED、RGB 灯都在各自的任务中运行，不依赖 loop()
     // arm_app_.update();  // 机械臂已禁用
-    car_app_.update();
     imu_app_.update();
-    stepper_app_.update();
     delay(1);
 }

@@ -20,13 +20,13 @@ public:
     OledApp();
 
     // 初始化屏幕并启动刷新任务；没检测到屏幕时返回 false，其余功能不受影响
-    bool begin(CarControllerApp &car, const WifiApp &wifi);
+    bool begin(const CarControllerApp &car, const WifiApp &wifi);
 
     void setRosState(RosAgentState state);
 
 private:
     OledDisplay        oled_;
-    CarControllerApp  *car_ = nullptr;
+    const CarControllerApp *car_ = nullptr;
     const WifiApp     *wifi_ = nullptr;
     TaskHandle_t       task_handle_ = nullptr;
 

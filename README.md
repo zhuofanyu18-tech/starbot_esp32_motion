@@ -27,7 +27,7 @@
 ┌────────────────────────── 电脑（ROS 2 Humble）──────────────────────────┐
 │  导航 / SLAM / 键盘遥控  ──/cmd_vel──►                                   │
 │                         ◄──/wheel_odom, /imu, /stepper_motor_status─   │
-│                     micro_ros_agent（串口 115200）                      │
+│                     micro_ros_agent（串口 921600）                      │
 └───────────────────────────────┬────────────────────────────────────────┘
                                 │ USB 串口
 ┌───────────────────────────────▼─────────────────────────────────────────┐
@@ -92,10 +92,10 @@ pio run -t upload    # 烧录
 ### 3. 启动 Agent
 
 ```bash
-ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 115200
+ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 921600
 ```
 
-OLED 第一行显示 `ROS: CONNECTED` 即表示连接成功。
+OLED 第一行显示 `ROS: CONNECTED` 即表示连接成功。一直显示 `ROS: WAIT AGENT` 时，检查波特率是否为 **921600**、USB 线是否接在 USB 转串口口上。
 
 ### 4. 测试底盘
 
@@ -140,6 +140,7 @@ ros2 topic echo /wheel_odom
 │   ├── BujinControl/         # Emm_V5 步进电机串口协议
 │   ├── Kinematics/           # 差速运动学与里程计
 │   ├── PidController/        # PID 控制器
+│   ├── PcntQuadEncoder/      # PCNT 正交编码器（无中断、无竞态）
 │   ├── IMU/                  # 维特 IMU 驱动
 │   └── ...                   # 机械臂舵机等旧模块（保留）
 └── data/                     # 电路原理图、开发板资料
@@ -157,6 +158,9 @@ ros2 topic echo /wheel_odom
 | `kWheelBaseMm` | 370 | 轮距（mm） |
 | `kEncoderPulsesPerRevolution` | 14000 | 轮子转一圈的编码器脉冲数 |
 | `Kp` / `Ki` / `Kd` | 1.0 / 0.3 / 0.5 | 轮速 PID 参数 |
+| `kRosCmdTimeoutMs` | 0 | ROS 速度指令超时，0 = 不超时（按前进一直走，发 0 速度才停） |
+| `kWifiCmdTimeoutMs` | 500 | 手机速度指令超时（网页持续发心跳，手机断开 0.5s 后停车） |
+| `kMicroRosBaudrate` | 921600 | micro-ROS 串口波特率，需与 Agent 的 `-b` 参数一致 |
 | `kMotorReversed` / `kEncoderReversed` | 全部 `false` | 电机 / 编码器方向反转 |
 | `kEnableAutoHoming` | `false` | 步进电机上电自动回零 |
 | `kOledI2cAddress` | `0x3C` | OLED 地址（部分模块为 `0x3D`） |
@@ -170,7 +174,8 @@ ros2 topic echo /wheel_odom
 
 - **编码器电平**：编码器由 5V 供电，请确认输出信号为 3.3V 电平，否则可能损坏 ESP32-S3。
 - **代码尚未上板验证**：当前版本仅通过编译，电机方向和 PID 参数需实测调整。
-- **没有 `/cmd_vel` 超时停车**：只有在与 Agent 断开连接时才会自动停车。
+- **ROS 速度指令默认不超时**：按前进会一直走，发 0 速度才停；与 Agent 断开时自动停车。如需超时保护，设置 `kRosCmdTimeoutMs`。
+- **波特率已改为 921600**：电脑端 Agent 的启动命令、launch 文件需要同步修改。
 
 完整的已知问题列表见 [src/README.md](src/README.md#六已知问题与漏洞)。
 

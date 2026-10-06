@@ -5,6 +5,8 @@
 #include <rclc/executor.h>
 #include <rclc/rclc.h>
 #include <std_msgs/msg/float32_multi_array.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "config/AppConfig.h"
 
@@ -18,11 +20,11 @@ public:
 
     StepperMotorApp();
 
-    // 初始化串口、使能电机、按配置回零（上电调用一次）
+    // 初始化串口、使能电机、按配置回零，并启动步进电机任务（上电调用一次）
+    // 串口收发（每条指令等待应答 10~200ms）全部在独立任务中进行，不会阻塞 micro-ROS 主循环
     void initHardware();
     bool createRosEntities(rclc_support_t &support, rcl_node_t &node, rclc_executor_t &executor);
     void destroyRosEntities(rcl_node_t &node);
-    void update();
 
 private:
     static StepperMotorApp *instance_;
@@ -43,7 +45,13 @@ private:
         bool     pending;
     };
 
+    // ---- 跨任务共享数据，用 lock_ 保护：ROS 回调写指令，步进任务写状态 ----
+    portMUX_TYPE lock_;
     MotorCommand pending_cmds_[kMotorCount] = {};
+    float        status_snapshot_[kMotorCount] = {};
+    TaskHandle_t task_handle_ = nullptr;
+
+    // ---- 以下只在步进电机任务中访问 ----
     float        current_positions_[kMotorCount] = {};
     float        target_turns_[kMotorCount] = {};
     bool         motors_enabled_ = false;
@@ -60,13 +68,16 @@ private:
     void startHomingBuiltin(size_t motor_index);
     int8_t pollHomingBuiltinStatus();
     void advanceToNextMotor();
+    void update();                  // 步进任务每个周期调用一次
     void processPendingCommands();
+    void updateStatusSnapshot();
     void publishStatus();
 
     uint32_t turnsToPulses(float turns) const;
 
     static void targetCallback(const void *msgin);
     static void statusTimerCallback(rcl_timer_t *timer, int64_t last_call_time);
+    static void stepperTaskFn(void *args);
 };
 
 #endif

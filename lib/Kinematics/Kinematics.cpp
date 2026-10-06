@@ -14,10 +14,12 @@ void Kinematics::set_wheel_distance(float wheel_distance)
 
 // 更新电机速度，编码器数据
 // 参数顺序：front_left_tick, front_right_tick, rear_left_tick, rear_right_tick
-void Kinematics::update_motor_speed(uint64_t current_time, int32_t front_left_tick, int32_t front_right_tick, int32_t rear_left_tick, int32_t rear_right_tick)
+void Kinematics::update_motor_speed(uint64_t current_time_us, int32_t front_left_tick, int32_t front_right_tick, int32_t rear_left_tick, int32_t rear_right_tick)
 {
-    uint32_t dt = (uint32_t)(current_time - last_update_time);
-    last_update_time = current_time;
+    // 第一次调用只记录基准，避免把上电以来的时间当作一个周期
+    const bool first = (last_update_time == 0);
+    uint64_t dt_us = current_time_us - last_update_time;
+    last_update_time = current_time_us;
 
     int32_t dtick0 = front_left_tick - motor_param_[0].last_encoder_tick;
     int32_t dtick1 = front_right_tick - motor_param_[1].last_encoder_tick;
@@ -29,14 +31,15 @@ void Kinematics::update_motor_speed(uint64_t current_time, int32_t front_left_ti
     motor_param_[2].last_encoder_tick = rear_left_tick;
     motor_param_[3].last_encoder_tick = rear_right_tick;
 
-    if (dt == 0) return;
+    if (first || dt_us == 0) return;
 
-    motor_param_[0].motor_speed = float(dtick0 * motor_param_[0].per_pulse_distance) / dt * 1000;
-    motor_param_[1].motor_speed = float(dtick1 * motor_param_[1].per_pulse_distance) / dt * 1000;
-    motor_param_[2].motor_speed = float(dtick2 * motor_param_[2].per_pulse_distance) / dt * 1000;
-    motor_param_[3].motor_speed = float(dtick3 * motor_param_[3].per_pulse_distance) / dt * 1000;
+    const float dt_s = float(dt_us) / 1000000.0f;
+    motor_param_[0].motor_speed = float(dtick0) * motor_param_[0].per_pulse_distance / dt_s;  // mm/s
+    motor_param_[1].motor_speed = float(dtick1) * motor_param_[1].per_pulse_distance / dt_s;
+    motor_param_[2].motor_speed = float(dtick2) * motor_param_[2].per_pulse_distance / dt_s;
+    motor_param_[3].motor_speed = float(dtick3) * motor_param_[3].per_pulse_distance / dt_s;
 
-    update_odom(dt);
+    update_odom(dt_s);
 }
 
 // 获取电机速度
@@ -94,9 +97,8 @@ void Kinematics::TransAngleInPI(float angle, float &out_angle)
 }
 
 // 更新里程计数据
-void Kinematics::update_odom(uint16_t dt)
+void Kinematics::update_odom(float dt_s)
 {
-    float dt_s = float(dt) / 1000;
 
     this->kinematics_forward(
         motor_param_[0].motor_speed, // front left

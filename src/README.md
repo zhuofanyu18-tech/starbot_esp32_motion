@@ -22,6 +22,10 @@
 | WiFi 预留 | 新增速度指令统一入口 `CarControllerApp::setTargetVelocity()`，后期手机遥控直接调用 |
 | 机械臂 | 改由电脑控制，ESP32 代码保留但不启用 |
 | 启用状态 | 底盘、IMU、步进电机、OLED 全部启用（之前 `main.cpp` 中底盘和 IMU 是注释掉的） |
+| 任务架构 | 测速 + PID + 里程计合并为固定在核 1 的 10ms 控制任务；步进电机串口移到独立任务；WiFi/网页/OLED/RGB 固定在核 0；控制任务和 loop 加看门狗 |
+| 编码器 | 新增 `lib/PcntQuadEncoder` 取代 `Esp32PcntEncoder`：去掉溢出中断，修复读数竞态导致的 ±100 脉冲跳变 |
+| 串口 | micro-ROS 波特率 115200 → **921600**（原带宽不足），收发缓冲区加大到 2KB |
+| 指令超时 | 速度指令记录来源和时间戳，ROS 默认不超时（按停才停），WiFi 默认 500ms 超时 |
 
 ---
 
@@ -29,9 +33,10 @@
 
 ### 1. 四轮差速底盘（`CarControllerApp`）
 - 订阅 `/cmd_vel`（`geometry_msgs/Twist`），逆运动学解算四个轮子目标速度
-- 每个轮子独立 PID 闭环（独立 FreeRTOS 任务，10ms 周期）
+- 每个轮子独立 PID 闭环（控制任务固定在核 1，严格 10ms 一次：测速 → 里程计 → PID → PWM）
 - 编码器计算轮速与里程计，发布 `/wheel_odom`（`nav_msgs/Odometry`，20Hz，`odom` → `base_footprint`）
 - 与 ROS 断开连接时自动停车
+- 速度指令超时：`kRosCmdTimeoutMs`（默认 0 = 不超时，保持最后一条指令直到发 0 速度）、`kWifiCmdTimeoutMs`（默认 500ms）
 
 ### 2. 步进电机（`StepperMotorApp`）
 - CN1、CN27 两个 Emm_V5 驱动器并联在同一条串口总线，地址分别为 1、2
@@ -69,7 +74,7 @@ WAITING_AGENT --ping成功--> AGENT_AVAILABLE --创建实体--> CONNECTED
      +---------------- DISCONNECTED <------ping失败----------+
 ```
 
-- 通过 `Serial`（开发板 USB 转串口那个口）与电脑通信，波特率 115200
+- 通过 `Serial`（开发板 USB 转串口那个口）与电脑通信，波特率 **921600**（电脑端 Agent 必须一致）
 - 节点名 `starbot_arm_controller`，话题名与之前保持一致，电脑端无需修改
 
 ### 6. WiFi 手机控制（`WifiApp` + `RgbLedApp`）
@@ -98,6 +103,30 @@ WebSocket 接口（`ws://192.168.4.1/ws`，文本指令）：
 > 小车正式跑时把 `kEnableRgbLed` 改为 `false`，或外接一颗 WS2812 到空闲引脚并修改 `kRgbLedPin`。
 
 ---
+
+### 7. 实时任务架构
+
+```
+核 1（实时）                                   核 0（后台）
+┌──────────────────────────────────┐          ┌──────────────────────────────┐
+│ car_ctrl  优先级10  10ms 周期     │          │ WiFi / lwIP 系统任务          │
+│  编码器→轮速→里程计→PID→PWM      │          │ httpd     优先级5  网页/WS     │
+│  写 State 快照  读 Command        │          │ rgb_led   优先级2  队列触发    │
+├──────────────────────────────────┤          │ oled      优先级1  200ms 刷新  │
+│ loopTask  优先级5  micro-ROS      │          └──────────────────────────────┘
+│  连接状态机 / executor / 发布      │
+├──────────────────────────────────┤
+│ stepper   优先级3  10ms 周期      │
+│  步进串口收发（等待应答时让出CPU） │
+└──────────────────────────────────┘
+```
+
+- **任务之间只通过加锁的小结构体交换数据**（拷贝几十字节，微秒级），不会互相阻塞：
+  - `Command`：`setTargetVelocity()` 写入（ROS 回调 / WiFi 网页），控制任务每周期读取
+  - `State`：控制任务每周期写入，里程计发布和 OLED 通过 `getState()` 读取
+  - 步进电机：ROS 回调写待发指令，步进任务写状态快照
+- `loop()` 被阻塞（重连、时间同步、发布）**不再影响**测速和 PID
+- 看门狗：控制任务和 `loop()` 卡死超过 5s 自动复位（复位后 PWM 归零，电机停转）
 
 ## 三、引脚分配
 
@@ -139,6 +168,7 @@ lib/
 ├── Drv8701Control/             # 新增：DRV8701E 驱动
 ├── OledDisplay/                # 新增：SSD1306 封装
 ├── RgbLed/                     # 新增：WS2812 RGB 灯封装
+├── PcntQuadEncoder/            # 新增：无中断、无竞态的 PCNT 正交编码器
 ├── BujinControl/               # Emm_V5 步进电机协议
 ├── Kinematics/ PidController/ IMU/ ...
 ```
@@ -150,7 +180,7 @@ lib/
 1. 编译上传：`pio run -t upload`
 2. 电脑端启动 Agent（串口号按实际情况）：
    ```bash
-   ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 115200
+   ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 921600
    ```
 3. OLED 第一行显示 `ROS: CONNECTED` 即连接成功
 4. **首次装车方向校准**（轮子先架空）：
@@ -167,21 +197,27 @@ lib/
 
 ### 硬件相关
 1. **编码器电平风险**：H1~H4 由 +5V 供电，如果编码器输出 5V 信号，直接接 ESP32-S3（3.3V，不耐 5V）可能损坏芯片。需确认输出电平，必要时加分压或电平转换。
-2. **GPIO48 板载 RGB 灯与右前编码器 ENC_B1 共用**：核心板的 RGB 灯在 GPIO48（官方 DevKitC v1.1 PDF 中为 GPIO38，以实际板子为准）。启用 RGB 灯时右前编码器被停用，右前轮速用右后轮代替，里程计精度下降；两者同时接入时信号会互相干扰。建议下一版 PCB 把 ENC_B1 改到空闲引脚（GPIO1/2/12/13/14）。
-3. **未经实物验证**：本次代码仅通过编译，电机方向、编码器方向、PID 参数均需上板测试。
+2. **GPIO48 板载 RGB 灯与右前编码器 ENC_B1 共用**：核心板的 RGB 灯在 GPIO48（官方 DevKitC v1.1 PDF 中为 GPIO38，以实际板子为准）。启用 RGB 灯时右前编码器被停用，右前轮速用右后轮代替，里程计精度下降；两者同时接入时信号会互相干扰。建议下一版 PCB 把 ENC_B1 改到空闲引脚（GPIO1/2/12/13/14）。如果把 `kRgbLedPin` 设为 38（与 DIRB 冲突），编译会直接报错。
+3. **未经实物验证**：代码仅通过编译。电机方向、编码器方向、新任务架构、WiFi 灯均需上板测试；测速窗口改为固定 10ms 后 PID 参数可能需要重新整定。
 
 ### 软件相关
-4. **没有 `/cmd_vel` 超时保护**：只在与 Agent 断开时停车。如果 Agent 仍在线但发布 `/cmd_vel` 的节点崩溃，小车会一直保持最后一次的速度。
-5. **步进电机串口忙等阻塞主循环**：`Emm_V5_Receive_Data` 每次最多忙等 200ms，发送步进指令时主循环被阻塞，期间轮速/里程计不更新，PID 使用的是旧速度。重连时 `rmw_uros_sync_session` 也会阻塞最多 1s。
-6. **步进电机位置是开环估计**：`/stepper_motor_status` 发布的是累加的指令圈数，不是电机真实位置；电机堵转或丢步时数值不准。并且代码假设电机地址 = 下标 + 1。
-7. **运动学数据无锁共享**：轮速和里程计在主循环中更新，PID 任务和 OLED 任务直接读取，没有加锁。单个 float 读写是原子的，但里程计结构体可能读到“半新半旧”的数据（影响很小）。`pid_mutex_` 已创建但未使用。
-8. **I2C 总线跨任务共用**：OLED（独立任务）和 IMU（主循环）依赖 Arduino `Wire` 内部的锁，没有额外的应用层互斥；OLED 整屏刷新约 25ms。
-9. **时间同步失败时时间戳错误**：如果 `rmw_uros_sync_session` 失败，`/wheel_odom` 和 `/imu` 的时间戳会从 0 开始。
-10. **里程计仅靠编码器**：没有与 IMU 融合，打滑时航向角会漂移（可在电脑端用 robot_localization 融合）。
-11. **micro-ROS 必须接“USB 转串口”那个口**：代码使用 `Serial`（UART0，开发板上的 CP2102 口），接原生 USB 口无法通信。
-12. **WiFi 没有身份验证**：任何连上热点的人都能控制，热点密码是唯一的保护，请修改默认密码 `starbot123`。WebSocket 指令也没有“控制权”机制，多台手机可同时操作。
-13. **WiFi 灯功能未经实物验证**：代码已编译通过、网页 JS 已做语法检查，但未在板子上实测。
-14. **机械臂代码引脚冲突**：`MicroRosArmControllerApp` 使用的 GPIO16/17 在新板上已是 PWMD / ENC_D2，切勿重新启用。`lib/MLTrol` 也未适配新引脚。
+4. **ROS 速度指令默认不超时**（`kRosCmdTimeoutMs = 0`，按前进一直走、按停才停）：只有与 Agent 断开时才停车。如果 Agent 仍在线但发布 `/cmd_vel` 的节点崩溃，小车会一直保持最后的速度。需要时改为 500。
+5. **步进电机位置是开环估计**：`/stepper_motor_status` 发布的是累加的指令圈数，不是电机真实位置；电机堵转或丢步时数值不准。并且代码假设电机地址 = 下标 + 1。
+6. **I2C 总线跨任务共用**：OLED（核 0）和 IMU（loop，核 1）依赖 Arduino `Wire` 内部的锁，没有额外的应用层互斥；OLED 整屏刷新约 25ms。
+7. **时间同步失败时时间戳错误**：如果 `rmw_uros_sync_session` 失败，`/wheel_odom` 和 `/imu` 的时间戳会从 0 开始。
+8. **里程计仅靠编码器**：没有与 IMU 融合，打滑时航向角会漂移（可在电脑端用 robot_localization 融合）。
+9. **micro-ROS 必须接“USB 转串口”那个口，波特率 921600**：代码使用 `Serial`（UART0），接原生 USB 口或 Agent 仍用 115200 都无法连接（OLED 一直显示 `ROS: WAIT AGENT`）。
+10. **WiFi 没有身份验证**：任何连上热点的人都能控制，热点密码是唯一的保护，请修改默认密码 `starbot123`。WebSocket 指令也没有“控制权”机制，多台手机可同时操作。
+11. **编码器计数依赖 PCNT 到达 ±32767 自动归零的硬件行为**：已用模拟验证换算逻辑（20 万个周期误差为 0），需实测确认。
+12. **机械臂代码引脚冲突**：`MicroRosArmControllerApp` 使用的 GPIO16/17 在新板上已是 PWMD / ENC_D2，切勿重新启用。`lib/MLTrol` 也未适配新引脚。
+
+### 已修复（2026-10-6 任务架构优化）
+- ~~轮速测量放在 `loop()` 中，loop 阻塞时 PID 使用过期速度~~ → 合并进 10ms 控制任务
+- ~~步进电机串口忙等最长 200ms，阻塞 micro-ROS 并可能导致串口接收溢出~~ → 独立任务 + 等待时让出 CPU
+- ~~编码器读数竞态，偶发 ±100 脉冲跳变~~ → `PcntQuadEncoder`，无中断
+- ~~运动学数据跨任务无锁共享~~ → `Command` / `State` 加锁快照
+- ~~串口 115200 带宽不足（里程计 + IMU 约 21KB/s > 11.5KB/s）~~ → 921600
+- ~~没有看门狗~~ → 控制任务与 loop 加入任务看门狗
 
 ---
 

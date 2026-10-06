@@ -13,7 +13,8 @@ bool RgbLedApp::begin() {
     queue_ = xQueueCreate(1, sizeof(RgbLedState));
     if (queue_ == nullptr) return false;
 
-    if (xTaskCreate(workerTaskFn, "rgb_led", 2048, this, 2, nullptr) != pdPASS) {
+    if (xTaskCreatePinnedToCore(workerTaskFn, "rgb_led", 2048, this, app_config::kRgbLedTaskPriority,
+                                nullptr, app_config::kBackgroundCore) != pdPASS) {
         vQueueDelete(queue_);
         queue_ = nullptr;
         return false;

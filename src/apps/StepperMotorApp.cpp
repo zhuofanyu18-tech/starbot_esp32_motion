@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <rmw_microros/rmw_microros.h>
 
 #include "BujinControl.h"
@@ -12,6 +13,7 @@ constexpr uint8_t StepperMotorApp::kMotorIds[StepperMotorApp::kMotorCount];
 
 StepperMotorApp::StepperMotorApp() {
     instance_ = this;
+    portMUX_INITIALIZE(&lock_);
 }
 
 void StepperMotorApp::allocateMessageMemory() {
@@ -60,6 +62,19 @@ void StepperMotorApp::initMotors() {
 void StepperMotorApp::initHardware() {
     allocateMessageMemory();
     initMotors();
+    updateStatusSnapshot();
+
+    xTaskCreatePinnedToCore(stepperTaskFn, "stepper", app_config::kStepperTaskStack, this,
+                            app_config::kStepperTaskPriority, &task_handle_, app_config::kRealtimeCore);
+}
+
+void StepperMotorApp::stepperTaskFn(void *args) {
+    auto *self = static_cast<StepperMotorApp *>(args);
+    while (true) {
+        self->update();
+        self->updateStatusSnapshot();
+        vTaskDelay(pdMS_TO_TICKS(app_config::kStepperPeriodMs));
+    }
 }
 
 bool StepperMotorApp::createRosEntities(
@@ -246,15 +261,17 @@ uint32_t StepperMotorApp::turnsToPulses(float turns) const {
 }
 
 void StepperMotorApp::processPendingCommands() {
-    // 收集所有待发指令（避免持锁时间过长）
+    // 收集所有待发指令（只在拷贝时加锁，串口收发期间不持有 lock_）
     MotorCommand batch[kMotorCount];
     size_t batch_count = 0;
+    portENTER_CRITICAL(&lock_);
     for (size_t i = 0; i < kMotorCount; ++i) {
         if (pending_cmds_[i].pending) {
             batch[batch_count++] = pending_cmds_[i];
             pending_cmds_[i].pending = false;
         }
     }
+    portEXIT_CRITICAL(&lock_);
 
     if (batch_count == 0) return;
 
@@ -289,16 +306,26 @@ void StepperMotorApp::processPendingCommands() {
     xSemaphoreGive(motor_mutex);
 }
 
-void StepperMotorApp::publishStatus() {
+void StepperMotorApp::updateStatusSnapshot() {
+    float status[kMotorCount];
     for (size_t i = 0; i < kMotorCount; ++i) {
         if (homing_ && i == homing_motor_index_) {
-            msg_status_.data.data[i] = -2.0f;  // 正在回零
+            status[i] = -2.0f;  // 正在回零
         } else if (!homed_ && i >= homing_motor_index_) {
-            msg_status_.data.data[i] = -1.0f;  // 等待回零
+            status[i] = -1.0f;  // 等待回零
         } else {
-            msg_status_.data.data[i] = current_positions_[i];
+            status[i] = current_positions_[i];
         }
     }
+    portENTER_CRITICAL(&lock_);
+    memcpy(status_snapshot_, status, sizeof(status));
+    portEXIT_CRITICAL(&lock_);
+}
+
+void StepperMotorApp::publishStatus() {
+    portENTER_CRITICAL(&lock_);
+    memcpy(msg_status_.data.data, status_snapshot_, sizeof(status_snapshot_));
+    portEXIT_CRITICAL(&lock_);
     rcl_ret_t ret = rcl_publish(&pub_status_, &msg_status_, nullptr); (void)ret;
 }
 
@@ -310,7 +337,7 @@ void StepperMotorApp::targetCallback(const void *msgin) {
     size_t count = msg.data.size < kMotorCount ? msg.data.size : kMotorCount;
     for (size_t i = 0; i < count; ++i) {
         float turns = msg.data.data[i];
-        MotorCommand &cmd = instance_->pending_cmds_[i];
+        MotorCommand cmd;
 
         cmd.addr    = kMotorIds[i];
         cmd.dir     = (turns >= 0.0f) ? 0 : 1;  // 正值 CW, 负值 CCW
@@ -318,6 +345,10 @@ void StepperMotorApp::targetCallback(const void *msgin) {
         cmd.acc     = app_config::kStepperDefaultAcceleration;
         cmd.clk     = instance_->turnsToPulses(turns);
         cmd.pending = (cmd.clk > 0);
+
+        portENTER_CRITICAL(&instance_->lock_);
+        instance_->pending_cmds_[i] = cmd;
+        portEXIT_CRITICAL(&instance_->lock_);
     }
 }
 

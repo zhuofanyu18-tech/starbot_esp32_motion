@@ -5,7 +5,32 @@
 
 namespace app_config {
 
-static constexpr uint32_t kDebugSerialBaudrate = 115200;
+// micro-ROS 串口（USB 转串口）。115200 只有 11.5KB/s，而里程计 20Hz(~14.6KB/s) + IMU 20Hz(~6.4KB/s) 已超出带宽，
+// 因此提高到 921600（约 92KB/s）。电脑端 Agent 需同步修改：micro_ros_agent serial --dev /dev/ttyUSB0 -b 921600
+static constexpr uint32_t kMicroRosBaudrate = 921600;
+static constexpr size_t   kMicroRosRxBufferSize = 2048;  // 默认仅 256 字节，主循环稍有延迟就会丢数据
+static constexpr size_t   kMicroRosTxBufferSize = 2048;  // 发送缓冲，避免发布大消息时阻塞主循环
+
+// ---- FreeRTOS 任务分配 ----
+// 核 0：WiFi 协议栈 / 网页服务器 / RGB 灯 / OLED（非实时）
+// 核 1：底盘控制（最高）> micro-ROS 主循环 > 步进电机（实时相关）
+static constexpr BaseType_t  kRealtimeCore = 1;
+static constexpr BaseType_t  kBackgroundCore = 0;
+static constexpr UBaseType_t kControlTaskPriority = 10;  // 底盘控制：测速 + PID + 里程计
+static constexpr uint32_t    kControlTaskStack = 4096;
+static constexpr uint32_t    kControlPeriodMs = 10;      // 100Hz
+static constexpr UBaseType_t kRosTaskPriority = 5;       // Arduino loopTask（micro-ROS）
+static constexpr UBaseType_t kStepperTaskPriority = 3;
+static constexpr uint32_t    kStepperTaskStack = 4096;
+static constexpr uint32_t    kStepperPeriodMs = 10;
+static constexpr UBaseType_t kHttpdTaskPriority = 5;
+static constexpr UBaseType_t kRgbLedTaskPriority = 2;
+static constexpr UBaseType_t kOledTaskPriority = 1;
+
+// ---- 速度指令超时（毫秒），0 表示不超时：保持最后一条指令，直到收到新指令（发 0 速度才停）----
+// 无论是否超时，与 Agent 断开连接时底盘都会立即停车
+static constexpr uint32_t kRosCmdTimeoutMs = 0;     // 键盘遥控按一下前进就一直前进，按停才停
+static constexpr uint32_t kWifiCmdTimeoutMs = 500;  // 手机网页持续发送心跳，手机锁屏/断网 0.5s 后自动停车
 static constexpr uint32_t kServoBaudrate = 1000000;
 
 // 舵机控制引脚（机械臂已改由电脑控制，ESP32 不再使用，保留定义供 MicroRosArmControllerApp 编译使用）
@@ -55,6 +80,7 @@ static constexpr gpio_num_t rr_encoder[2] = {GPIO_NUM_18, GPIO_NUM_17};  // ENC_
 static constexpr bool kMotorReversed[4]   = {false, false, false, false};
 static constexpr bool kEncoderReversed[4] = {false, false, false, false};
 static constexpr uint32_t kMotorPwmFrequencyHz = 20000;  // DRV8701E PWM 频率
+static constexpr uint16_t kEncoderGlitchFilterCycles = 1000;  // 编码器毛刺滤波（APB 时钟周期，1000≈12.5us，最大 1023）
 
 
 // IMU (Wit-Motion) 话题与参数

@@ -60,6 +60,9 @@ bool WifiApp::begin(RgbLedApp &led) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
     config.max_uri_handlers = 4;
+    // 网页服务器固定在核 0（与 WiFi 协议栈同核），不占用核 1 的控制和 ROS 时间
+    config.core_id = app_config::kBackgroundCore;
+    config.task_priority = app_config::kHttpdTaskPriority;
     if (httpd_start(&server_, &config) != ESP_OK) {
         server_ = nullptr;
         return false;
