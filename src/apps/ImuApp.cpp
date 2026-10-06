@@ -3,27 +3,16 @@
 #include <micro_ros_utilities/string_utilities.h>
 #include <rmw_microros/rmw_microros.h>
 
-namespace {
-
-void stopOnError(rcl_ret_t ret) {
-    if (ret != RCL_RET_OK) {
-        delay(2000);
-        esp_restart();
-    }
-}
-
-} // namespace
-
 ImuApp *ImuApp::instance_ = nullptr;
 
 ImuApp::ImuApp() {
     instance_ = this;
 }
 
-void ImuApp::begin(rclc_support_t &support, rcl_node_t &node, rclc_executor_t &executor) {
+bool ImuApp::initHardware() {
     if (!imu_.begin(app_config::kImuSdaPin, app_config::kImuSclPin)) {
         // IMU not detected — continue without it, won't publish
-        return;
+        return false;
     }
 
     msg_imu_.header.frame_id =
@@ -33,18 +22,31 @@ void ImuApp::begin(rclc_support_t &support, rcl_node_t &node, rclc_executor_t &e
     msg_imu_.orientation_covariance[0] = -1.0;
     msg_imu_.angular_velocity_covariance[0] = -1.0;
     msg_imu_.linear_acceleration_covariance[0] = -1.0;
+    return true;
+}
 
-    stopOnError(rclc_publisher_init_default(
-        &pub_imu_, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
-        app_config::kImuTopic));
+bool ImuApp::createRosEntities(rclc_support_t &support, rcl_node_t &node, rclc_executor_t &executor) {
+    if (!imu_.isConnected()) return true;
 
-    stopOnError(rclc_timer_init_default(
-        &timer_imu_, &support,
-        RCL_MS_TO_NS(app_config::kImuPublishPeriodMs),
-        imuTimerCallback));
+    if (rclc_publisher_init_default(
+            &pub_imu_, &node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
+            app_config::kImuTopic) != RCL_RET_OK) return false;
 
-    stopOnError(rclc_executor_add_timer(&executor, &timer_imu_));
+    if (rclc_timer_init_default(
+            &timer_imu_, &support,
+            RCL_MS_TO_NS(app_config::kImuPublishPeriodMs),
+            imuTimerCallback) != RCL_RET_OK) return false;
+
+    return rclc_executor_add_timer(&executor, &timer_imu_) == RCL_RET_OK;
+}
+
+void ImuApp::destroyRosEntities(rcl_node_t &node) {
+    rcl_ret_t ret;
+    ret = rcl_publisher_fini(&pub_imu_, &node); (void)ret;
+    ret = rcl_timer_fini(&timer_imu_); (void)ret;
+    pub_imu_   = rcl_get_zero_initialized_publisher();
+    timer_imu_ = rcl_get_zero_initialized_timer();
 }
 
 void ImuApp::update() {

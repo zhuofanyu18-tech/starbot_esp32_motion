@@ -11,10 +11,12 @@ QueueHandle_t motor_cmd_queue = NULL;
 
 /**
  * @brief    步进电机初始化
+ * @param    rx_pin ：ESP32 接收引脚（接驱动器 TX）
+ * @param    tx_pin ：ESP32 发送引脚（接驱动器 RX）
  */
-void Emm_V5_INIT(void)
-{               
-  Serial2.begin(115200, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+void Emm_V5_INIT(int8_t rx_pin, int8_t tx_pin)
+{
+  Serial2.begin(115200, SERIAL_8N1, rx_pin, tx_pin);
   // 创建互斥锁和队列
   motor_mutex = xSemaphoreCreateMutex();
   motor_cmd_queue = xQueueCreate(50, sizeof(MotorCmd_t));

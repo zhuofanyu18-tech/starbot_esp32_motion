@@ -1,391 +1,157 @@
-# ESP32 + MoveIt2 新手版说明
+# SLAM Car ESP32-S3 固件说明
 
-这个目录现在使用 `main.cpp` 作为唯一入口，流程是：
+## 更新日期：2026-10-6
 
-1. 初始化舵机串口和 micro-ROS 串口  
-2. 订阅 MoveIt2 发来的轨迹话题  
-3. 按标定表把 ROS 角度换算成舵机值  
-4. 发布 `/joint_states`
+适配新电路板（硬件参考 `data/photo/电路图1.jpeg`，开发板参考 `data/pdf/ESP32-S3-DevKitC.pdf`）。
 
-## 话题
+---
 
-- 机械臂轨迹：`/arm_controller/joint_trajectory`
-- 夹爪轨迹：`/gripper_controller/joint_trajectory`
-- 关节状态：`/joint_states`
+## 一、本次修改内容（2026-10-6）
 
-## ROS角度 -> 舵机值 标定
+| 模块 | 修改 |
+|---|---|
+| 引脚 | 全部引脚按新电路图重新分配，集中在 `config/AppConfig.h` |
+| 底盘电机 | 驱动换成 DRV8701E（PWM + DIR），新增 `lib/Drv8701Control`，旧的 `PwmControl` 保留不用 |
+| 编码器 | H1~H4 改到新引脚，新增电机/编码器方向反转配置 |
+| 步进电机 | 串口改为 RX1=GPIO10 / TX1=GPIO11，引脚只在 `AppConfig.h` 定义一处（修复之前两处定义不一致的问题） |
+| OLED | 新增 SSD1306 128×64 显示模块：`lib/OledDisplay`（底层封装）+ `apps/OledApp`（显示内容） |
+| micro-ROS | 新增断线重连状态机：Agent 未启动时不再卡死，USB 断开后自动重连，断线时底盘自动停车 |
+| App 结构 | 每个 App 拆成「硬件初始化（上电一次）」和「创建/销毁 ROS 实体（每次连接/断开）」 |
+| WiFi 预留 | 新增速度指令统一入口 `CarControllerApp::setTargetVelocity()`，后期手机控制直接调用 |
+| 机械臂 | 改由电脑控制，ESP32 代码保留但不启用 |
+| 启用状态 | 底盘、IMU、步进电机、OLED 全部启用（之前 `main.cpp` 中底盘和 IMU 是注释掉的） |
 
+---
 
-说明：
+## 二、实现的功能
 
-- `joint1/joint2/joint4/joint5` 使用“分段线性”映射（以 0 点为分段）。
-- `joint3` 和夹爪使用“两点线性”映射。
-- 超出范围会自动夹紧到最近端点，避免越界。
+### 1. 四轮差速底盘（`CarControllerApp`）
+- 订阅 `/cmd_vel`（`geometry_msgs/Twist`），逆运动学解算四个轮子目标速度
+- 每个轮子独立 PID 闭环（独立 FreeRTOS 任务，10ms 周期）
+- 编码器计算轮速与里程计，发布 `/wheel_odom`（`nav_msgs/Odometry`，20Hz，`odom` → `base_footprint`）
+- 与 ROS 断开连接时自动停车
 
+### 2. 步进电机（`StepperMotorApp`）
+- CN1、CN27 两个 Emm_V5 驱动器并联在同一条串口总线，地址分别为 1、2
+- 订阅 `/stepper_motor_target`（`std_msgs/Float32MultiArray`）：`[电机1圈数, 电机2圈数]`，相对运动，正值 CW、负值 CCW
+- 发布 `/stepper_motor_status`（1Hz）：当前位置估计（圈），`-2` 表示正在回零，`-1` 表示等待回零
+- 可选上电自动碰撞回零（`kEnableAutoHoming`，默认关闭）
 
-#include <Arduino.h>
-#include <Esp32PcntEncoder.h>
-#include <PwmControl.h>
-#include <PidController.h>
-#include <Kinematics.h>
+### 3. IMU（`ImuApp`）
+- 维特 IMU，I2C 接口（地址 0x50），与 OLED 共用 SDA/SCL
+- 发布 `/imu`（`sensor_msgs/Imu`，20Hz，`imu_link`）
+- 未检测到 IMU 时自动跳过，不影响其他功能
 
-// 引入ROS相关头文件
-#include <WiFi.h>
-#include <micro_ros_platformio.h>
-#include <rcl/rcl.h>
-#include <rclc/rclc.h>
-#include <rclc/executor.h>
-#include <nav_msgs/msg/odometry.h>//里程计消息接口
-#include <geometry_msgs/msg/twist.h>//速度控制消息接口
-#include <micro_ros_utilities/string_utilities.h>
-#include <cmath> // 用于数学计算
-#include <freertos/semphr.h> // 用于互斥锁
+### 4. OLED 显示（`OledApp`）
+- SSD1306 128×64，I2C 地址 0x3C，200ms 刷新一次，运行在独立任务中，ROS 断线时照常显示
+- 显示内容：
 
-// 全局互斥锁，保护共享变量
-SemaphoreHandle_t g_mutex = NULL;
+```
+[ROS: CONNECTED     ]   ← ROS 状态（WAIT AGENT / CREATING NODE / CONNECTED / RECONNECTING）
 
-// 全局对象
-PWMControl motor;
-Esp32PcntEncoder encoders[4]; // 创建一个数组用于存储四个编码器
-PidController pid_controller[4];
-Kinematics kinematics;
+v  +0.25 m/s            ← 整车线速度
+w  +0.50 rad/s          ← 整车角速度
 
-// ROS相关对象
-rcl_allocator_t allocator;
-rclc_support_t support;
-rclc_executor_t executor;
-rcl_node_t node;
-rcl_publisher_t pub_odom;
-nav_msgs__msg__Odometry msg_odom;
-rcl_timer_t timer;
-rcl_subscription_t sub_cmd_vel;
-geometry_msgs__msg__Twist msg_cmd_vel;
+FL+0.25  FR+0.25        ← 四轮速度 m/s
+RL+0.25  RR+0.25
+Up 00:12:34             ← 运行时间
+```
 
-// 编码器参数
-const int ENCODER_TICKS_PER_REV = 14000; // 每转编码器脉冲数14000（2）、7441（1）
-const float WHEEL_DIAMETER = 125.0; // 轮子直径（mm）
-const float WHEEL_CIRCUMFERENCE = WHEEL_DIAMETER * 3.1415926535; // 轮子周长（mm）
-const float MM_PER_TICK = WHEEL_CIRCUMFERENCE / ENCODER_TICKS_PER_REV; // 每脉冲距离（mm）
+- 未接屏幕时自动跳过
 
-// 全局变量
-int64_t last_ticks[4] = {0, 0, 0, 0};
-int64_t last_update_time = 0;
-float current_speed[4] = {0.0, 0.0, 0.0, 0.0}; // 当前速度（mm/s）
+### 5. micro-ROS 连接管理（`main.cpp`）
 
-float target_linear_speed = 0.0; // 目标线速度（mm/s）
-float target_angular_speed = 0.0; // 目标角速度（rad/s）
+```
+WAITING_AGENT --ping成功--> AGENT_AVAILABLE --创建实体--> CONNECTED
+     ^                                                       |
+     +---------------- DISCONNECTED <------ping失败----------+
+```
 
+- 通过 `Serial`（开发板 USB 转串口那个口）与电脑通信，波特率 115200
+- 节点名 `starbot_arm_controller`，话题名与之前保持一致，电脑端无需修改
 
-// 每个轮子独立的PID参数（顺序：前左、前右、后左、后右）
-// 优化后参数：增大Kp和Kd提高停止响应速度，减小Ki避免积分累积
-const float kp[4] = {1.0, 1.0, 1.0, 1.0};       // 增大比例系数，提高响应速度
-const float ki[4] = {0.3, 0.3, 0.3, 0.3};   // 减小积分系数，避免积分累积导致滞后
-const float kd[4] = {0.5, 0.5, 0.5, 0.5};   // 增大微分系数，加强制动效果
+---
 
+## 三、引脚分配
 
+| 功能 | 信号 | GPIO |
+|---|---|---|
+| 左前电机 A（CN25） | PWMA / DIRA | 42 / 41 |
+| 右前电机 B（CN25） | PWMB / DIRB | 21 / 38 |
+| 左后电机 C（CN26） | PWMC / DIRC | 4 / 5 |
+| 右后电机 D（CN26） | PWMD / DIRD | 16 / 15 |
+| 左前编码器 H1 | ENC_A1 / ENC_A2 | 40 / 39 |
+| 右前编码器 H2 | ENC_B1 / ENC_B2 | 48 / 47 |
+| 左后编码器 H3 | ENC_C1 / ENC_C2 | 6 / 7 |
+| 右后编码器 H4 | ENC_D1 / ENC_D2 | 18 / 17 |
+| 步进电机串口（CN1、CN27） | RX1（ESP 接收）/ TX1（ESP 发送） | 10 / 11 |
+| I2C（OLED + IMU） | SDA / SCL | 8 / 9 |
+| micro-ROS | USB 串口 | 43 / 44（开发板内部） |
+| 未使用 | NET1 / NET2 / NET12 / NET13 / NET14 | 1 / 2 / 12 / 13 / 14 |
 
-// 编码器数据采集任务（最高优先级，仅负责速度计算）
-void encoder_update_task(void* args) {
-    while (true) {
-        int64_t current_time = millis();
-        
-        // 获取互斥锁保护共享变量
-        if (g_mutex != NULL) {
-            xSemaphoreTake(g_mutex, portMAX_DELAY);
-        }
-        
-        int64_t dt = current_time - last_update_time;
-        
-        if (dt > 0) {
-            // 计算速度
-            for (int i = 0; i < 4; i++) {
-                int32_t current_ticks = encoders[i].getTicks();
-                int32_t delta_ticks = current_ticks - last_ticks[i];
-                
-                // 计算速度：(脉冲数 * 每脉冲距离) / 时间
-                current_speed[i] = (delta_ticks * MM_PER_TICK) / (dt / 1000.0);
-                last_ticks[i] = current_ticks;
-            }
-        }
-        
-        last_update_time = current_time;
-        
-        // 释放互斥锁
-        if (g_mutex != NULL) {
-            xSemaphoreGive(g_mutex);
-        }
-        
-        // 使用非阻塞延迟
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
+---
 
-// PID控制任务（高优先级，仅负责电机闭环控制）
-void pid_control_task(void* args) {
-    while (true) {
-        float local_speed[4];
-        
-        // 获取互斥锁读取共享变量（最小化临界区）
-        if (g_mutex != NULL) {
-            xSemaphoreTake(g_mutex, portMAX_DELAY);
-            for (int i = 0; i < 4; i++) {
-                local_speed[i] = current_speed[i];
-            }
-            xSemaphoreGive(g_mutex);
-        } else {
-            for (int i = 0; i < 4; i++) {
-                local_speed[i] = current_speed[i];
-            }
-        }
-        
-        // 运行PID控制（带死区处理和积分重置）
-        for (int i = 0; i < 4; i++) {
-            float pid_output = pid_controller[i].update(local_speed[i]);
-            
-            // 死区处理：当目标速度为0且当前速度很小时，直接停止电机
-            // 避免低速抖动和爬行现象，并重置PID积分项
-            float target_speed = pid_controller[i].get_target();
-            if (target_speed == 0.0 && fabs(local_speed[i]) < 30.0) {
-                pid_output = 0;  // 直接停转
-                pid_controller[i].reset();  // 重置PID积分项，避免下次启动冲击
-            }
-            
-            // 应用PID输出到电机（PID内部已有限制）
-            motor.updateMotorSpeed(i, pid_output);     
-        }
-        
-        // 使用非阻塞延迟
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-}
+## 四、代码结构
 
-// 里程计更新任务（较低优先级，50ms周期）
-void odometry_update_task(void* args) {
-    while (true) {
-        int64_t current_time = millis();
-        int32_t ticks[4];
-        
-        // 获取互斥锁读取编码器数据（与encoder_update_task同步）
-        if (g_mutex != NULL) {
-            xSemaphoreTake(g_mutex, portMAX_DELAY);
-            for (int i = 0; i < 4; i++) {
-                ticks[i] = last_ticks[i]; // 使用已缓存的编码器值
-            }
-            xSemaphoreGive(g_mutex);
-        } else {
-            for (int i = 0; i < 4; i++) {
-                ticks[i] = last_ticks[i];
-            }
-        }
-        
-        // 更新运动学数据（使用缓存的编码器数据，保证与速度计算同步）
-        kinematics.update_motor_speed(current_time, 
-                                     ticks[0], // front_left
-                                     ticks[1], // front_right
-                                     ticks[2], // rear_left
-                                     ticks[3]); // rear_right
-        
-        // 使用非阻塞延迟
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-}
+```
+src/
+├── main.cpp                    # 硬件初始化 + micro-ROS 连接状态机
+├── config/AppConfig.h          # 所有引脚、话题名、参数
+├── utils/RosAgentState.h       # ROS 连接状态枚举
+└── apps/
+    ├── CarControllerApp        # 底盘：cmd_vel、PID、里程计
+    ├── StepperMotorApp         # 步进电机
+    ├── ImuApp                  # IMU
+    ├── OledApp                 # OLED 显示
+    └── MicroRosArmControllerApp # 机械臂（保留，不启用）
+lib/
+├── Drv8701Control/             # 新增：DRV8701E 驱动
+├── OledDisplay/                # 新增：SSD1306 封装
+├── BujinControl/               # Emm_V5 步进电机协议
+├── Kinematics/ PidController/ IMU/ ...
+```
 
+---
 
+## 五、使用与调试
 
+1. 编译上传：`pio run -t upload`
+2. 电脑端启动 Agent（串口号按实际情况）：
+   ```bash
+   ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 115200
+   ```
+3. OLED 第一行显示 `ROS: CONNECTED` 即连接成功
+4. **首次装车方向校准**（轮子先架空）：
+   ```bash
+   ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.1}}"
+   ```
+   - 哪个轮子往后转 → 把 `AppConfig.h` 中 `kMotorReversed` 对应位置改为 `true`
+   - OLED 上哪个轮速为负 → 把 `kEncoderReversed` 对应位置改为 `true`
+   - 顺序均为：左前、右前、左后、右后
 
+---
 
+## 六、已知问题与漏洞
 
+### 硬件相关
+1. **编码器电平风险**：H1~H4 由 +5V 供电，如果编码器输出 5V 信号，直接接 ESP32-S3（3.3V，不耐 5V）可能损坏芯片。需确认输出电平，必要时加分压或电平转换。
+2. **GPIO38 与板载 RGB 灯共用**：DevKitC 上 GPIO38 经 R17（0Ω）接 RGB 灯，电机 B 换向时 RGB 灯会乱闪，功能不受影响，介意可拆 R17。
+3. **未经实物验证**：本次代码仅通过编译，电机方向、编码器方向、PID 参数均需上板测试。
 
+### 软件相关
+4. **没有 `/cmd_vel` 超时保护**：只在与 Agent 断开时停车。如果 Agent 仍在线但发布 `/cmd_vel` 的节点崩溃，小车会一直保持最后一次的速度。
+5. **步进电机串口忙等阻塞主循环**：`Emm_V5_Receive_Data` 每次最多忙等 200ms，发送步进指令时主循环被阻塞，期间轮速/里程计不更新，PID 使用的是旧速度。重连时 `rmw_uros_sync_session` 也会阻塞最多 1s。
+6. **步进电机位置是开环估计**：`/stepper_motor_status` 发布的是累加的指令圈数，不是电机真实位置；电机堵转或丢步时数值不准。并且代码假设电机地址 = 下标 + 1。
+7. **运动学数据无锁共享**：轮速和里程计在主循环中更新，PID 任务和 OLED 任务直接读取，没有加锁。单个 float 读写是原子的，但里程计结构体可能读到“半新半旧”的数据（影响很小）。`pid_mutex_` 已创建但未使用。
+8. **I2C 总线跨任务共用**：OLED（独立任务）和 IMU（主循环）依赖 Arduino `Wire` 内部的锁，没有额外的应用层互斥；OLED 整屏刷新约 25ms。
+9. **时间同步失败时时间戳错误**：如果 `rmw_uros_sync_session` 失败，`/wheel_odom` 和 `/imu` 的时间戳会从 0 开始。
+10. **里程计仅靠编码器**：没有与 IMU 融合，打滑时航向角会漂移（可在电脑端用 robot_localization 融合）。
+11. **micro-ROS 必须接“USB 转串口”那个口**：代码使用 `Serial`（UART0，开发板上的 CP2102 口），接原生 USB 口无法通信。
+12. **机械臂代码引脚冲突**：`MicroRosArmControllerApp` 使用的 GPIO16/17 在新板上已是 PWMD / ENC_D2，切勿重新启用。`lib/MLTrol` 也未适配新引脚。
 
-// 定时器的回调函数
-void timer_callback(rcl_timer_t* timer, int64_t last_call_time) {
-    // 完成里程计的发布
-    odom_t odom = kinematics.get_odom();//获取当前的里程计信息
-    int64_t stamp = rmw_uros_epoch_millis();//获取当前时间戳，单位为毫秒
-    msg_odom.header.stamp.sec = static_cast<int32_t>(stamp / 1000);//秒部分
-    msg_odom.header.stamp.nanosec = static_cast<int32_t>((stamp % 1000) * 1000000);//纳秒部分
-    msg_odom.pose.pose.position.x = odom.x;
-    msg_odom.pose.pose.position.y = odom.y;
-    msg_odom.pose.pose.orientation.w = cos(odom.angle/2.0);
-    msg_odom.pose.pose.orientation.x = 0;
-    msg_odom.pose.pose.orientation.y = 0;
-    msg_odom.pose.pose.orientation.z = sin(odom.angle/2.0);
-    msg_odom.twist.twist.linear.x = odom.linear_speed;
-    msg_odom.twist.twist.linear.y = 0.0;
-    msg_odom.twist.twist.angular.z = odom.angle_speed;
-    //发布里程计消息，把数据发送出去
-    // 发布里程计消息
-    rcl_ret_t ret = rcl_publish(&pub_odom, &msg_odom, NULL);
-    (void)ret; // 消除未使用返回值的警告
-}
+---
 
-// cmd_vel 订阅回调函数
-void cmd_vel_callback(const void* msgin) {
-    // 转换消息指针
-    const geometry_msgs__msg__Twist* msg = (const geometry_msgs__msg__Twist*) msgin;
-    
-    // 提取线速度和角速度（ROS的单位是m/s和rad/s，转换为mm/s）
-    // 注意：target_linear_speed和target_angular_speed未使用互斥锁保护，仅用于调试/记录
-    target_linear_speed = msg->linear.x * 1000.0; // 转换为mm/s
-    target_angular_speed = msg->angular.z; // 角速度保持rad/s
-    
-    // 计算逆运动学，获取各轮目标速度
-    float front_left_speed, front_right_speed, rear_left_speed, rear_right_speed;
-    kinematics.kinematics_inverse(target_linear_speed, target_angular_speed, 
-                                 front_left_speed, front_right_speed, 
-                                 rear_left_speed, rear_right_speed);
+## 七、后续计划
 
-    // 更新PID目标值（使用互斥锁保护，避免与pid_control_task竞争）
-    if (g_mutex != NULL) {
-        xSemaphoreTake(g_mutex, portMAX_DELAY);
-    }
-    pid_controller[0].update_target(front_left_speed);   // front_left
-    pid_controller[1].update_target(front_right_speed);  // front_right
-    pid_controller[2].update_target(rear_left_speed);    // rear_left
-    pid_controller[3].update_target(rear_right_speed);   // rear_right
-    if (g_mutex != NULL) {
-        xSemaphoreGive(g_mutex);
-    }
-}
-
-// 单独创建一个任务，单独运行micro-ros相当于一个单独的线程
-void micro_ros_task(void* args ) {
-    //1.设置传输协议并延迟一段时间等待设置的完成
-    set_microros_serial_transports(Serial);
-    delay(2000); // 等待2秒，确保设置完成
-
-    //2.初始化内存分配器
-    allocator = rcl_get_default_allocator();                                    //获取默认的内存分配器
-    //3.初始化支持
-    rclc_support_init(&support, 0, NULL, &allocator);                           //初始化支持，0表示没有参数，NULL表示没有参数，&allocator表示使用默认的内存分配器
-    //4.初始化节点
-    rclc_node_init_default(&node,"lajixiaoche","",&support);                    //初始化节点，"lajixiaoche"表示节点名称，""表示命名空间，&support表示使用默认的支持  
-    //5.初始化执行器
-    unsigned int num_handles = 3;                                               //订阅和计时器回调的数量，需要改的参数
-    rclc_executor_init(&executor, &support.context, num_handles, &allocator);   //初始化执行器，4表示最多可以添加4个回调函数，&allocator表示使用默认的内存分配器
-    
-    //初始化msg
-    msg_odom.header.frame_id = micro_ros_string_utilities_set(msg_odom.header.frame_id, "/wheel_odom");
-    msg_odom.child_frame_id = micro_ros_string_utilities_set(msg_odom.child_frame_id, "base_footprint");
-    //初始化定时器和发布者
-    rclc_publisher_init_best_effort(&pub_odom, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry), "/wheel_odom");//初始化发布者，&node表示节点对象，nav_msgs__msg__Odometry表示消息类型，"/wheel_odom"表示话题名称
-
-    rclc_timer_init_default(&timer, &support, RCL_MS_TO_NS(50), timer_callback);//初始化定时器，&support表示使用默认的支持，RCL_MS_TO_NS(50)表示定时器周期为50毫秒，timer_callback表示回调函数
-    rclc_executor_add_timer(&executor, &timer);//将定时器添加到执行器中，&executor表示执行器对象，&timer表示定时器对象
-    
-    // 初始化cmd_vel订阅者
-    rclc_subscription_init_default(&sub_cmd_vel, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "/cmd_vel");
-    rclc_executor_add_subscription(&executor, &sub_cmd_vel, &msg_cmd_vel, cmd_vel_callback, ON_NEW_DATA);
-    // //时间同步
-    // while (!rmw_uros_epoch_synchronized()) {
-    //     rmw_uros_sync_session(1000);
-    //     delay(10);
-    // }
-    //时间同步（带超时机制和重试）
-    int sync_timeout = 10000;  // 增加超时时间到10秒
-    int sync_start = millis();
-    int retry_count = 0;
-    while (!rmw_uros_epoch_synchronized()) {
-        rmw_uros_sync_session(100);
-        delay(1);
-        if (millis() - sync_start > sync_timeout) {
-            // 超时后重新尝试初始化
-            retry_count++;
-            if (retry_count < 3) {
-                // 重新初始化支持
-                rclc_support_fini(&support);
-                rclc_support_init(&support, 0, NULL, &allocator);
-                sync_start = millis();  // 重置超时计时器
-            } else {
-                // 重试3次后继续执行
-                break;
-            }
-        }
-    }
-    
-    //7.循环执行器
-    rclc_executor_spin(&executor);//循环执行器，等待订阅和计时器回调的触发
-}
-
-
-
-void setup()
-{
-    // 初始化串口（仅用于ROS通信）
-    Serial.begin(115200);
-
-    // 初始化电机
-
-    // motor.attachMotor(0, GPIO_NUM_42, GPIO_NUM_40, GPIO_NUM_41);
-    // motor.attachMotor(1, GPIO_NUM_39, GPIO_NUM_37, GPIO_NUM_38);
-    // motor.attachMotor(2, GPIO_NUM_4, GPIO_NUM_6, GPIO_NUM_5);
-    // motor.attachMotor(3, GPIO_NUM_16, GPIO_NUM_7, GPIO_NUM_15);
-    motor.attachMotor(0, GPIO_NUM_42, GPIO_NUM_41, GPIO_NUM_40);
-    motor.attachMotor(1, GPIO_NUM_37, GPIO_NUM_39, GPIO_NUM_38);
-    motor.attachMotor(2, GPIO_NUM_4, GPIO_NUM_6, GPIO_NUM_5);
-    motor.attachMotor(3, GPIO_NUM_16, GPIO_NUM_7, GPIO_NUM_15);
-
-    // 设置电机速度为0（简化为循环）
-    for (int i = 0; i < 4; i++) {
-        motor.updateMotorSpeed(i, 0);
-    }
-
-    // 初始化编码器
-    // encoders[0].init(0, 20, 21); // 前左轮编码器
-    // encoders[0].reset();
-    // encoders[1].init(1, 36, 35); // 前右轮编码器
-    // encoders[1].reset();
-    // encoders[2].init(2, 11, 10); // 后左轮编码器
-    // encoders[2].reset();
-    // encoders[3].init(3, 12, 13); // 后右轮编码器
-    // encoders[3].reset();
-
-    encoders[0].init(0, 21, 20); // 前左轮编码器
-    encoders[0].reset();
-    encoders[1].init(1, 36, 35); // 前右轮编码器
-    encoders[1].reset();
-    encoders[2].init(2, 11, 10); // 后左轮编码器
-    encoders[2].reset();
-    encoders[3].init(3, 13, 12); // 后右轮编码器
-    encoders[3].reset();
-
-    // 初始化PID控制器（每个轮子使用独立的PID参数）
-    for (int i = 0; i < 4; i++) {
-        pid_controller[i].update_pid(kp[i], ki[i], kd[i]);
-        pid_controller[i].out_limit(-1000, 1000);
-        pid_controller[i].update_target(0.0);
-    }
-
-    // 初始化运动学参数
-    kinematics.set_wheel_distance(370.0); // 单位：mm
-    // 使用已定义的每脉冲距离
-    kinematics.set_motor_param(0, MM_PER_TICK); // front_left
-    kinematics.set_motor_param(1, MM_PER_TICK); // front_right
-    kinematics.set_motor_param(2, MM_PER_TICK); // rear_left
-    kinematics.set_motor_param(3, MM_PER_TICK); // rear_right
-
-    // 初始化变量
-    last_update_time = millis();
-
-    // 创建互斥锁保护共享变量
-    g_mutex = xSemaphoreCreateMutex();
-    
-    // 创建编码器采集任务（最高优先级，保证数据采集实时性）
-    xTaskCreate(encoder_update_task, "encoder_update_task", 2048, NULL, 4, NULL);
-    
-    // 创建PID控制任务（高优先级，保证控制实时性）
-    xTaskCreate(pid_control_task, "pid_control_task", 2048, NULL, 3, NULL);
-    
-    // 创建里程计更新任务（较低优先级）
-    xTaskCreate(odometry_update_task, "odometry_update_task", 2048, NULL, 2, NULL);
-    
-    // 创建micro-ros任务（最低优先级）
-    xTaskCreate(micro_ros_task, "micro_ros_task", 16384, NULL, 1, NULL);
-}
-
-void loop()
-{
-    // 主任务可以为空，或者用于低优先级的后台任务
-}
-
-刚刚网络卡了，然后我把代码的GPIO口已经设置好了，话题名字也设置好了。请你帮我把README.md的优秀的代码给我总结一下，分析我目前的代码需要如何修正呢
+1. **WiFi 手机控制**：ESP32 开 WiFi，手机网页摇杆控制小车方向并显示 ROS 状态；micro-ROS 仍走串口。速度指令统一调用 `CarControllerApp::setTargetVelocity()`，届时需要增加手机与 ROS 指令的优先级仲裁和超时停车。
+2. 第二个功能：待定。

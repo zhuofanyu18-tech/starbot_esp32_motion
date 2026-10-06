@@ -18,7 +18,10 @@ public:
 
     StepperMotorApp();
 
-    void begin(rclc_support_t &support, rcl_node_t &node, rclc_executor_t &executor);
+    // 初始化串口、使能电机、按配置回零（上电调用一次）
+    void initHardware();
+    bool createRosEntities(rclc_support_t &support, rcl_node_t &node, rclc_executor_t &executor);
+    void destroyRosEntities(rcl_node_t &node);
     void update();
 
 private:

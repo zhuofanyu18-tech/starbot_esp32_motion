@@ -15,8 +15,13 @@ public:
 
     ImuApp();
 
-    void begin(rclc_support_t &support, rcl_node_t &node, rclc_executor_t &executor);
+    // 探测并初始化 IMU（上电调用一次）；I2C 总线需在外部先初始化（与 OLED 共用）
+    bool initHardware();
+    // IMU 未检测到时不创建任何实体，直接返回 true
+    bool createRosEntities(rclc_support_t &support, rcl_node_t &node, rclc_executor_t &executor);
+    void destroyRosEntities(rcl_node_t &node);
     void update();
+    bool isConnected() const { return imu_.isConnected(); }
 
 private:
     static ImuApp *instance_;

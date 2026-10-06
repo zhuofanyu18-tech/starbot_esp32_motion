@@ -4,18 +4,6 @@
 #include <micro_ros_utilities/string_utilities.h>
 #include <rmw_microros/rmw_microros.h>
 
-namespace {
-
-void stopOnError(rcl_ret_t ret) {
-    if (ret != RCL_RET_OK) {
-        // Serial.printf("[CarController] RCL error %d, restarting...\n", (int)ret);
-        delay(2000);
-        esp_restart();
-    }
-}
-
-} // namespace
-
 // CarControllerApp * 定义instance_的类型，也就是一个对象指针，并且先把它初始化为 nullptr（空指针，表示目前没有指向任何对象）
 CarControllerApp *CarControllerApp::instance_ = nullptr;
 
@@ -43,11 +31,14 @@ CarControllerApp::CarControllerApp() {
 
 // 初始化硬件接口，包括电机、编码器、PID 控制器和运动学参数
 void CarControllerApp::initHardware() {
-    // 机械臂已废弃，GPIO 16 不再与舵机冲突
-    motor_.attachMotor(0, app_config::lf_motor[0], app_config::lf_motor[1], app_config::lf_motor[2]);
-    motor_.attachMotor(1, app_config::rf_motor[0], app_config::rf_motor[1], app_config::rf_motor[2]);
-    motor_.attachMotor(2, app_config::lr_motor[0], app_config::lr_motor[1], app_config::lr_motor[2]);
-    motor_.attachMotor(3, app_config::rr_motor[0], app_config::rr_motor[1], app_config::rr_motor[2]);
+    // DRV8701E：PWM + DIR
+    const gpio_num_t *motors[kWheelCount] = {
+        app_config::lf_motor, app_config::rf_motor, app_config::lr_motor, app_config::rr_motor};
+    for (int i = 0; i < kWheelCount; i++) {
+        motor_.attachMotor(i, motors[i][0], motors[i][1],
+                           app_config::kMotorReversed[i], app_config::kMotorPwmFrequencyHz);
+        motor_.updateMotorSpeed(i, 0);
+    }
 
     encoders_[0].init(0, app_config::lf_encoder[0], app_config::lf_encoder[1]); encoders_[0].reset();
     encoders_[1].init(1, app_config::rf_encoder[0], app_config::rf_encoder[1]); encoders_[1].reset();
@@ -63,43 +54,88 @@ void CarControllerApp::initHardware() {
     kinematics_.set_wheel_distance(app_config::kWheelBaseMm);
     const float ppd = (app_config::kWheelDiameterMm * 3.1415926535f) / app_config::kEncoderPulsesPerRevolution;
     for (int i = 0; i < 4; i++) kinematics_.set_motor_param(i, ppd);
-}
 
-void CarControllerApp::begin(rclc_support_t &support, rcl_node_t &node, rclc_executor_t &executor) 
-{
-    initHardware();
-
+    // 字符串只分配一次，重连时复用
     msg_odom_.header.frame_id = micro_ros_string_utilities_set(msg_odom_.header.frame_id, "odom");
     msg_odom_.child_frame_id = micro_ros_string_utilities_set(msg_odom_.child_frame_id, "base_footprint");
 
-    stopOnError(rclc_subscription_init_best_effort(
-        &sub_cmd_vel_, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-        app_config::kCmdVelTopic));
-
-    stopOnError(rclc_publisher_init_default(
-        &pub_odom_, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
-        app_config::kOdomTopic));
-
-    stopOnError(rclc_timer_init_default(
-        &timer_odom_, &support,
-        RCL_MS_TO_NS(app_config::kOdomPublishPeriodMs),
-        odomTimerCallback));
-
-    stopOnError(rclc_executor_add_subscription(
-        &executor, &sub_cmd_vel_, &msg_cmd_vel_, twistCallback, ON_NEW_DATA));
-    stopOnError(rclc_executor_add_timer(&executor, &timer_odom_));
-
+    // PID 任务与 ROS 连接无关，上电即运行（目标速度为 0 时电机保持静止）
     xTaskCreate(pidControlTaskFn, "pid_ctrl", 2048, this, 3, &pid_task_handle_);
+}
+
+bool CarControllerApp::createRosEntities(rclc_support_t &support, rcl_node_t &node, rclc_executor_t &executor)
+{
+    if (rclc_subscription_init_best_effort(
+            &sub_cmd_vel_, &node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+            app_config::kCmdVelTopic) != RCL_RET_OK) return false;
+
+    if (rclc_publisher_init_default(
+            &pub_odom_, &node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
+            app_config::kOdomTopic) != RCL_RET_OK) return false;
+
+    if (rclc_timer_init_default(
+            &timer_odom_, &support,
+            RCL_MS_TO_NS(app_config::kOdomPublishPeriodMs),
+            odomTimerCallback) != RCL_RET_OK) return false;
+
+    if (rclc_executor_add_subscription(
+            &executor, &sub_cmd_vel_, &msg_cmd_vel_, twistCallback, ON_NEW_DATA) != RCL_RET_OK) return false;
+    if (rclc_executor_add_timer(&executor, &timer_odom_) != RCL_RET_OK) return false;
+    return true;
+}
+
+void CarControllerApp::destroyRosEntities(rcl_node_t &node)
+{
+    rcl_ret_t ret;
+    ret = rcl_subscription_fini(&sub_cmd_vel_, &node); (void)ret;
+    ret = rcl_publisher_fini(&pub_odom_, &node); (void)ret;
+    ret = rcl_timer_fini(&timer_odom_); (void)ret;
+    sub_cmd_vel_ = rcl_get_zero_initialized_subscription();
+    pub_odom_    = rcl_get_zero_initialized_publisher();
+    timer_odom_  = rcl_get_zero_initialized_timer();
 }
 
 void CarControllerApp::update()
 {
-    kinematics_.update_motor_speed(
-        millis(),
-        encoders_[0].getTicks(), encoders_[1].getTicks(),
-        encoders_[2].getTicks(), encoders_[3].getTicks());
+    int32_t ticks[kWheelCount];
+    for (int i = 0; i < kWheelCount; i++) {
+        ticks[i] = encoders_[i].getTicks();
+        if (app_config::kEncoderReversed[i]) ticks[i] = -ticks[i];
+    }
+    kinematics_.update_motor_speed(millis(), ticks[0], ticks[1], ticks[2], ticks[3]);
+}
+
+void CarControllerApp::setTargetVelocity(float linear_mps, float angular_radps)
+{
+    float fl, fr, rl, rr;
+    kinematics_.kinematics_inverse(linear_mps * 1000.0f, angular_radps, fl, fr, rl, rr);
+    pid_[0].update_target(fl);
+    pid_[1].update_target(fr);
+    pid_[2].update_target(rl);
+    pid_[3].update_target(rr);
+}
+
+void CarControllerApp::stop()
+{
+    setTargetVelocity(0.0f, 0.0f);
+}
+
+float CarControllerApp::getLinearSpeed()
+{
+    return kinematics_.get_odom().linear_speed;
+}
+
+float CarControllerApp::getAngularSpeed()
+{
+    return kinematics_.get_odom().angle_speed;
+}
+
+float CarControllerApp::getWheelSpeed(uint8_t id)
+{
+    if (id >= kWheelCount) return 0.0f;
+    return kinematics_.get_motor_speed(id) / 1000.0f;
 }
 
 void CarControllerApp::publishOdom() {
@@ -119,14 +155,7 @@ void CarControllerApp::publishOdom() {
 void CarControllerApp::twistCallback(const void *msgin) {
     if (!instance_ || !msgin) return;
     const auto &msg = *static_cast<const geometry_msgs__msg__Twist *>(msgin);
-    float linear_mm = msg.linear.x * 1000.0f;
-    float angular   = msg.angular.z;
-    float fl, fr, rl, rr;
-    instance_->kinematics_.kinematics_inverse(linear_mm, angular, fl, fr, rl, rr);
-    instance_->pid_[0].update_target(fl);
-    instance_->pid_[1].update_target(fr);
-    instance_->pid_[2].update_target(rl);
-    instance_->pid_[3].update_target(rr);
+    instance_->setTargetVelocity(msg.linear.x, msg.angular.z);
 }
 
 void CarControllerApp::odomTimerCallback(rcl_timer_t *timer, int64_t) {

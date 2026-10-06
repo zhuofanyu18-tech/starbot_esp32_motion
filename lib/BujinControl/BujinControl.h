@@ -7,8 +7,9 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #define ABS(x) ((x) > 0 ? (x) : -(x))
-#define UART_TX_PIN 18 // ESP32步进电机发送引脚
-#define UART_RX_PIN 17 // ESP32步进电机接收引脚
+// 默认引脚与新电路板一致（RX1=GPIO10, TX1=GPIO11），实际以 AppConfig 传入的为准
+#define UART_TX_PIN 11 // ESP32步进电机发送引脚
+#define UART_RX_PIN 10 // ESP32步进电机接收引脚
 
 extern SemaphoreHandle_t motor_mutex;
 extern QueueHandle_t motor_cmd_queue;
@@ -44,7 +45,7 @@ typedef enum
 /**********************************************************
 *** 注意：每个函数的参数的具体说明，请查阅下方的函数的注释说明
 **********************************************************/
-void Emm_V5_INIT(void);                                                                                                                                                             // 步进电机初始化
+void Emm_V5_INIT(int8_t rx_pin = UART_RX_PIN, int8_t tx_pin = UART_TX_PIN);                                                                                                                                                             // 步进电机初始化
 void Emm_V5_Reset_CurPos_To_Zero(uint8_t addr);                                                                                                                                     // 将当前位置清零
 void Emm_V5_Reset_Clog_Pro(uint8_t addr);                                                                                                                                           // 解除堵转保护
 void Emm_V5_Read_Sys_Params(uint8_t addr, SysParams_t s);                                                                                                                           // 读取参数

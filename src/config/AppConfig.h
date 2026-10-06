@@ -8,7 +8,8 @@ namespace app_config {
 static constexpr uint32_t kDebugSerialBaudrate = 115200;
 static constexpr uint32_t kServoBaudrate = 1000000;
 
-// 舵机控制引脚（机械臂已废弃，保留定义供 MicroRosArmControllerApp 编译使用）
+// 舵机控制引脚（机械臂已改由电脑控制，ESP32 不再使用，保留定义供 MicroRosArmControllerApp 编译使用）
+// 注意：新电路板上 GPIO16=PWMD、GPIO17=ENC_D2，切勿再启用机械臂 App
 static constexpr uint8_t kServoTxPin = 17;
 static constexpr uint8_t kServoRxPin = 16;
 
@@ -39,27 +40,50 @@ static constexpr float kEncoderPulsesPerRevolution = 14000.0f; // 编码器每�
 static constexpr float Kp = 1.0f;                     // PID 控制器的比例增益
 static constexpr float Ki = 0.3f;                     // PID 控制器的积分增益
 static constexpr float Kd = 0.5f;                     // PID 控制器的微分增益
-static constexpr gpio_num_t lf_motor[3] = {GPIO_NUM_42, GPIO_NUM_40, GPIO_NUM_41};  // PWM, DIR1, DIR2
-static constexpr gpio_num_t rf_motor[3] = {GPIO_NUM_37, GPIO_NUM_38, GPIO_NUM_39};  // PWM, DIR1, DIR2
-static constexpr gpio_num_t lr_motor[3] = {GPIO_NUM_4, GPIO_NUM_6, GPIO_NUM_5};     // PWM, DIR1, DIR2
-static constexpr gpio_num_t rr_motor[3] = {GPIO_NUM_16, GPIO_NUM_7, GPIO_NUM_15};   // PWM, DIR1, DIR2
-static constexpr gpio_num_t lf_encoder[2] = {GPIO_NUM_21, GPIO_NUM_20};  // A, B
-static constexpr gpio_num_t rf_encoder[2] = {GPIO_NUM_35, GPIO_NUM_36};  // A, B
-static constexpr gpio_num_t lr_encoder[2] = {GPIO_NUM_10, GPIO_NUM_11};  // A, B
-static constexpr gpio_num_t rr_encoder[2] = {GPIO_NUM_13, GPIO_NUM_12};  // A, B
+// 电机驱动 DRV8701E（PH/EN 模式：一个 PWM + 一个方向）
+// 轮子对应关系：A=左前(CN25)  B=右前(CN25)  C=左后(CN26)  D=右后(CN26)
+static constexpr gpio_num_t lf_motor[2] = {GPIO_NUM_42, GPIO_NUM_41};  // PWMA, DIRA
+static constexpr gpio_num_t rf_motor[2] = {GPIO_NUM_21, GPIO_NUM_38};  // PWMB, DIRB（GPIO38 同时接开发板 RGB 灯）
+static constexpr gpio_num_t lr_motor[2] = {GPIO_NUM_4,  GPIO_NUM_5};   // PWMC, DIRC
+static constexpr gpio_num_t rr_motor[2] = {GPIO_NUM_16, GPIO_NUM_15};  // PWMD, DIRD
+// 编码器：H1=左前  H2=右前  H3=左后  H4=右后
+static constexpr gpio_num_t lf_encoder[2] = {GPIO_NUM_40, GPIO_NUM_39};  // ENC_A1, ENC_A2
+static constexpr gpio_num_t rf_encoder[2] = {GPIO_NUM_48, GPIO_NUM_47};  // ENC_B1, ENC_B2
+static constexpr gpio_num_t lr_encoder[2] = {GPIO_NUM_6,  GPIO_NUM_7};   // ENC_C1, ENC_C2
+static constexpr gpio_num_t rr_encoder[2] = {GPIO_NUM_18, GPIO_NUM_17};  // ENC_D1, ENC_D2
+// 装车后若某个轮子转向反了 / 编码器计数方向反了，只需改这里，顺序：左前、右前、左后、右后
+static constexpr bool kMotorReversed[4]   = {false, false, false, false};
+static constexpr bool kEncoderReversed[4] = {false, false, false, false};
+static constexpr uint32_t kMotorPwmFrequencyHz = 20000;  // DRV8701E PWM 频率
 
 
 // IMU (Wit-Motion) 话题与参数
 static constexpr char kImuTopic[] = "/imu";
 static constexpr uint32_t kImuPublishPeriodMs = 50;  // 20Hz
 
-// IMU I2C 引脚
-static constexpr uint8_t kImuSdaPin = 8;
-static constexpr uint8_t kImuSclPin = 9;
+// I2C 总线（IMU 与 OLED 共用）
+static constexpr uint8_t  kI2cSdaPin = 8;
+static constexpr uint8_t  kI2cSclPin = 9;
+static constexpr uint32_t kI2cClockHz = 400000;
+static constexpr uint8_t  kImuSdaPin = kI2cSdaPin;
+static constexpr uint8_t  kImuSclPin = kI2cSclPin;
+
+// ---- OLED SSD1306 128x64 (I2C) ----
+static constexpr uint8_t  kOledI2cAddress = 0x3C;
+static constexpr uint8_t  kOledWidth = 128;
+static constexpr uint8_t  kOledHeight = 64;
+static constexpr uint32_t kOledRefreshPeriodMs = 200;  // 5Hz
+
+// ---- micro-ROS Agent 连接检测 ----
+static constexpr uint32_t kAgentPingPeriodMs = 500;    // 未连接时探测 Agent 的周期
+static constexpr uint32_t kAgentCheckPeriodMs = 1000;  // 已连接时检测是否断线的周期
+static constexpr uint32_t kAgentPingTimeoutMs = 100;
+static constexpr uint8_t  kAgentPingAttempts = 3;      // 已连接时连续 ping 失败的容忍次数
 
 // ---- 步进电机 ----
-static constexpr uint8_t kStepperTxPin = 17;  // 与 BujinControl.h 中 UART_TX_PIN 一致
-static constexpr uint8_t kStepperRxPin = 18;  // 与 BujinControl.h 中 UART_RX_PIN 一致
+// CN1 / CN27 两个步进驱动并联在同一条串口总线上，靠地址 1、2 区分
+static constexpr uint8_t kStepperRxPin = 10;  // RX1：ESP32 接收，接驱动器 TX
+static constexpr uint8_t kStepperTxPin = 11;  // TX1：ESP32 发送，接驱动器 RX
 static constexpr char kStepperTargetTopic[] = "/stepper_motor_target";
 static constexpr char kStepperStatusTopic[] = "/stepper_motor_status";
 static constexpr uint32_t kStepperStatusPublishPeriodMs = 1000;   // 1Hz

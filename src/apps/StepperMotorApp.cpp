@@ -6,17 +6,6 @@
 
 #include "BujinControl.h"
 
-namespace {
-
-void stopOnError(rcl_ret_t ret) {
-    if (ret != RCL_RET_OK) {
-        delay(2000);
-        esp_restart();
-    }
-}
-
-}  // namespace
-
 StepperMotorApp *StepperMotorApp::instance_ = nullptr;
 
 constexpr uint8_t StepperMotorApp::kMotorIds[StepperMotorApp::kMotorCount];
@@ -50,7 +39,7 @@ void StepperMotorApp::allocateMessageMemory() {
 }
 
 void StepperMotorApp::initMotors() {
-    Emm_V5_INIT();
+    Emm_V5_INIT(app_config::kStepperRxPin, app_config::kStepperTxPin);
     Emm_V5_En_Control(0, true, false);
     motors_enabled_ = true;
 
@@ -68,30 +57,42 @@ void StepperMotorApp::initMotors() {
     }
 }
 
-void StepperMotorApp::begin(
-    rclc_support_t &support, rcl_node_t &node, rclc_executor_t &executor) {
-
+void StepperMotorApp::initHardware() {
     allocateMessageMemory();
     initMotors();
+}
 
-    stopOnError(rclc_subscription_init_default(
-        &sub_target_, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-        app_config::kStepperTargetTopic));
+bool StepperMotorApp::createRosEntities(
+    rclc_support_t &support, rcl_node_t &node, rclc_executor_t &executor) {
 
-    stopOnError(rclc_publisher_init_default(
-        &pub_status_, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-        app_config::kStepperStatusTopic));
+    if (rclc_subscription_init_default(
+            &sub_target_, &node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+            app_config::kStepperTargetTopic) != RCL_RET_OK) return false;
 
-    stopOnError(rclc_timer_init_default(
-        &timer_status_, &support,
-        RCL_MS_TO_NS(app_config::kStepperStatusPublishPeriodMs),
-        statusTimerCallback));
+    if (rclc_publisher_init_default(
+            &pub_status_, &node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+            app_config::kStepperStatusTopic) != RCL_RET_OK) return false;
 
-    stopOnError(rclc_executor_add_subscription(
-        &executor, &sub_target_, &msg_target_, targetCallback, ON_NEW_DATA));
-    stopOnError(rclc_executor_add_timer(&executor, &timer_status_));
+    if (rclc_timer_init_default(
+            &timer_status_, &support,
+            RCL_MS_TO_NS(app_config::kStepperStatusPublishPeriodMs),
+            statusTimerCallback) != RCL_RET_OK) return false;
+
+    if (rclc_executor_add_subscription(
+            &executor, &sub_target_, &msg_target_, targetCallback, ON_NEW_DATA) != RCL_RET_OK) return false;
+    return rclc_executor_add_timer(&executor, &timer_status_) == RCL_RET_OK;
+}
+
+void StepperMotorApp::destroyRosEntities(rcl_node_t &node) {
+    rcl_ret_t ret;
+    ret = rcl_subscription_fini(&sub_target_, &node); (void)ret;
+    ret = rcl_publisher_fini(&pub_status_, &node); (void)ret;
+    ret = rcl_timer_fini(&timer_status_); (void)ret;
+    sub_target_   = rcl_get_zero_initialized_subscription();
+    pub_status_   = rcl_get_zero_initialized_publisher();
+    timer_status_ = rcl_get_zero_initialized_timer();
 }
 
 void StepperMotorApp::startHomingBuiltin(size_t motor_index) {
