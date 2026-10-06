@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>StarBot 控制台</title>
+  <style>
+    :root{color-scheme:dark;--bg:#07111f;--card:#111d2e;--line:#293a50;--text:#eef6ff;--muted:#91a5bd;--cyan:#22d3ee;--green:#22c55e;--red:#ef4444}
+    *{box-sizing:border-box}
+    body{margin:0;background:linear-gradient(160deg,#07111f,#0d1b2a 55%,#07111f);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;min-height:100vh}
+    .wrap{max-width:560px;margin:auto;padding:20px 16px 48px}
+    h1{font-size:24px;margin:4px 0}
+    .subtitle{color:var(--muted);font-size:14px;margin-bottom:16px}
+    .statusbar,.card{background:rgba(17,29,46,.94);border:1px solid var(--line);border-radius:16px;box-shadow:0 12px 30px #0005}
+    .statusbar{padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}
+    .label{font-size:11px;color:var(--muted)}
+    .value{font-size:15px;font-weight:700;margin-top:4px}
+    .online{color:var(--green)}.offline{color:var(--red)}
+    .card{padding:18px;margin-bottom:14px}
+    h2{font-size:18px;margin:0 0 14px}
+    .preview-row{display:flex;align-items:center;gap:16px;margin-bottom:16px}
+    .preview{width:72px;height:72px;border-radius:50%;border:2px solid var(--line);background:#000;flex:none;transition:background .15s,box-shadow .15s}
+    .preview-text{font-size:14px;color:var(--muted);line-height:1.6}
+    .preview-text strong{color:var(--text);font-size:16px}
+    button{border:0;border-radius:11px;padding:13px 12px;font-weight:700;font-size:15px;color:#fff;background:#334155;touch-action:manipulation;cursor:pointer}
+    button:disabled{opacity:.4}
+    .switch-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
+    .on-btn{background:#0891b2}.off-btn{background:#475569}
+    .presets{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+    .preset{height:46px;padding:0;border:2px solid transparent;color:#0008;font-size:13px}
+    .preset.active{border-color:#fff}
+    .picker-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}
+    .picker-row label{font-size:14px;color:var(--muted)}
+    input[type=color]{width:64px;height:40px;border:1px solid #36506f;border-radius:10px;background:#091525;padding:3px}
+    .slider-head{display:flex;justify-content:space-between;align-items:center;margin-top:12px}
+    .slider-head label{font-size:14px;color:var(--muted)}
+    .slider-output{font-size:18px;font-weight:800;color:var(--cyan)}
+    input[type=range]{width:100%;accent-color:var(--cyan);margin:12px 0 0}
+    .hint{color:var(--muted);font-size:13px;line-height:1.55;margin:12px 0 0}
+    .disabled-note{display:none;border-left:3px solid #f59e0b;padding:8px 10px;background:#f59e0b14;color:#fcd38d;border-radius:6px;font-size:13px;margin-bottom:14px}
+    #toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:#0f2438;border:1px solid #36506f;border-radius:10px;padding:10px 14px;max-width:90%;opacity:0;pointer-events:none;transition:.2s}
+    #toast.show{opacity:1}
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <h1>StarBot 控制台</h1>
+  <div class="subtitle">ESP32-S3 · WiFi 直连</div>
+
+  <section class="statusbar">
+    <div><div class="label">连接状态</div><div id="wsState" class="value offline">未连接</div></div>
+    <div><div class="label">RGB 灯</div><div id="ledSummary" class="value">--</div></div>
+  </section>
+
+  <section class="card">
+    <h2>RGB 灯控制</h2>
+    <p id="disabledNote" class="disabled-note">固件中 RGB 灯未启用（AppConfig.h 中 kEnableRgbLed=false）</p>
+
+    <div class="preview-row">
+      <div id="preview" class="preview"></div>
+      <div class="preview-text"><strong id="previewState">--</strong><br><span id="previewColor">#------</span></div>
+    </div>
+
+    <div class="switch-row">
+      <button id="btnOn" class="on-btn">开灯</button>
+      <button id="btnOff" class="off-btn">关灯</button>
+    </div>
+
+    <div id="presets" class="presets"></div>
+
+    <div class="picker-row">
+      <label for="picker">自定义颜色</label>
+      <input id="picker" type="color" value="#ffffff">
+    </div>
+
+    <div class="slider-head">
+      <label for="brightness">亮度</label>
+      <span id="brightnessValue" class="slider-output">50%</span>
+    </div>
+    <input id="brightness" type="range" min="0" max="100" step="1" value="50">
+
+    <p class="hint">多台手机可同时打开本页面，灯的状态会自动同步。</p>
+  </section>
+</main>
+<div id="toast"></div>
+<script>
+const PRESETS=[['红','#ff0000'],['绿','#00ff00'],['蓝','#0000ff'],['白','#ffffff'],['黄','#ffff00'],['青','#00ffff'],['紫','#ff00ff'],['橙','#ff6000']];
+const $=id=>document.getElementById(id);
+let socket=null,reconnectTimer=null,led=null;
+
+function toast(text){const el=$('toast');el.textContent=text;el.classList.add('show');clearTimeout(el.timer);el.timer=setTimeout(()=>el.classList.remove('show'),2200)}
+function send(text){if(socket&&socket.readyState===WebSocket.OPEN){socket.send(text);return true}toast('尚未连接到小车');return false}
+
+// 拖动取色器 / 亮度条时会连续触发事件，限制为最多每 80ms 发送一次，并保证最后一次一定发出
+function throttle(fn,ms){let last=0,timer=null,pending=null;return v=>{pending=v;const wait=ms-(Date.now()-last);if(wait<=0){last=Date.now();fn(pending)}else if(!timer){timer=setTimeout(()=>{timer=null;last=Date.now();fn(pending)},wait)}}}
+
+const hex=v=>v.toString(16).padStart(2,'0');
+const toHex=(r,g,b)=>`#${hex(r)}${hex(g)}${hex(b)}`;
+const fromHex=h=>[1,3,5].map(i=>parseInt(h.substr(i,2),16));
+
+function sendColor(h){const [r,g,b]=fromHex(h);send(`LED_COLOR,${r},${g},${b}`)}
+const sendColorThrottled=throttle(sendColor,80);
+const sendBrightnessThrottled=throttle(v=>send(`LED_BRIGHTNESS,${v}`),80);
+
+function render(){
+  if(!led)return;
+  const color=toHex(led.r,led.g,led.b),on=led.on&&led.brightness>0;
+  $('disabledNote').style.display=led.enabled?'none':'block';
+  document.querySelectorAll('button,input').forEach(el=>el.disabled=!led.enabled);
+  $('preview').style.background=on?color:'#000';
+  $('preview').style.opacity=on?(0.35+0.65*led.brightness/100):1;
+  $('preview').style.boxShadow=on?`0 0 ${10+led.brightness/3}px ${color}`:'none';
+  $('previewState').textContent=on?'已开启':'已关闭';
+  $('previewColor').textContent=`${color.toUpperCase()} · 亮度 ${led.brightness}%`;
+  $('ledSummary').textContent=!led.enabled?'未启用':(led.on?'开':'关');
+  $('ledSummary').className='value '+(led.enabled&&led.on?'online':'');
+  // 用户正在拖动时不覆盖控件，避免来回跳动
+  if(document.activeElement!==$('picker'))$('picker').value=color;
+  if(document.activeElement!==$('brightness'))$('brightness').value=led.brightness;
+  $('brightnessValue').textContent=`${$('brightness').value}%`;
+  document.querySelectorAll('.preset').forEach(b=>b.classList.toggle('active',b.dataset.color===color));
+}
+
+function handleMessage(msg){
+  if(msg.type==='error'){toast(msg.message||msg.code);return}
+  if(msg.type==='led'){led=msg;render()}
+}
+
+function connect(){
+  clearTimeout(reconnectTimer);
+  socket=new WebSocket(`ws://${location.host}/ws`);
+  socket.onopen=()=>{$('wsState').textContent='已连接';$('wsState').className='value online';send('STATE_GET')};
+  socket.onclose=()=>{$('wsState').textContent='重连中';$('wsState').className='value offline';reconnectTimer=setTimeout(connect,1500)};
+  socket.onerror=()=>{$('wsState').textContent='连接错误';$('wsState').className='value offline'};
+  socket.onmessage=e=>{try{handleMessage(JSON.parse(e.data))}catch(_){toast(e.data)}};
+}
+
+PRESETS.forEach(([name,color])=>{
+  $('presets').insertAdjacentHTML('beforeend',`<button class="preset" data-color="${color}" style="background:${color}">${name}</button>`);
+});
+document.querySelectorAll('.preset').forEach(b=>b.onclick=()=>sendColor(b.dataset.color));
+$('btnOn').onclick=()=>send('LED_ON');
+$('btnOff').onclick=()=>send('LED_OFF');
+$('picker').oninput=e=>sendColorThrottled(e.target.value);
+$('brightness').oninput=e=>{$('brightnessValue').textContent=`${e.target.value}%`;sendBrightnessThrottled(e.target.value)};
+connect();
+</script>
+</body>
+</html>

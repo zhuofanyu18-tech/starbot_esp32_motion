@@ -41,7 +41,10 @@ void CarControllerApp::initHardware() {
     }
 
     encoders_[0].init(0, app_config::lf_encoder[0], app_config::lf_encoder[1]); encoders_[0].reset();
-    encoders_[1].init(1, app_config::rf_encoder[0], app_config::rf_encoder[1]); encoders_[1].reset();
+    // GPIO48 被板载 RGB 灯占用时，不初始化右前编码器
+    if (!app_config::kEnableRgbLed) {
+        encoders_[1].init(1, app_config::rf_encoder[0], app_config::rf_encoder[1]); encoders_[1].reset();
+    }
     encoders_[2].init(2, app_config::lr_encoder[0], app_config::lr_encoder[1]); encoders_[2].reset();
     encoders_[3].init(3, app_config::rr_encoder[0], app_config::rr_encoder[1]); encoders_[3].reset();
 
@@ -101,9 +104,12 @@ void CarControllerApp::update()
 {
     int32_t ticks[kWheelCount];
     for (int i = 0; i < kWheelCount; i++) {
+        if (i == 1 && app_config::kEnableRgbLed) continue;
         ticks[i] = encoders_[i].getTicks();
         if (app_config::kEncoderReversed[i]) ticks[i] = -ticks[i];
     }
+    // 右前编码器停用时用同侧右后轮代替，否则右前轮 PID 一直读到 0 速会全速输出
+    if (app_config::kEnableRgbLed) ticks[1] = ticks[3];
     kinematics_.update_motor_speed(millis(), ticks[0], ticks[1], ticks[2], ticks[3]);
 }
 

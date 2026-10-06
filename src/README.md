@@ -17,7 +17,9 @@
 | OLED | 新增 SSD1306 128×64 显示模块：`lib/OledDisplay`（底层封装）+ `apps/OledApp`（显示内容） |
 | micro-ROS | 新增断线重连状态机：Agent 未启动时不再卡死，USB 断开后自动重连，断线时底盘自动停车 |
 | App 结构 | 每个 App 拆成「硬件初始化（上电一次）」和「创建/销毁 ROS 实体（每次连接/断开）」 |
-| WiFi 预留 | 新增速度指令统一入口 `CarControllerApp::setTargetVelocity()`，后期手机控制直接调用 |
+| WiFi 手机控制 | 新增 `WifiApp`：ESP32 开热点，手机浏览器打开网页通过 WebSocket 控制，第一阶段实现 RGB 灯开关/颜色/亮度 |
+| RGB 灯 | 新增 `lib/RgbLed` + `apps/RgbLedApp`，板载 WS2812（GPIO48），队列 + 工作任务写灯 |
+| WiFi 预留 | 新增速度指令统一入口 `CarControllerApp::setTargetVelocity()`，后期手机遥控直接调用 |
 | 机械臂 | 改由电脑控制，ESP32 代码保留但不启用 |
 | 启用状态 | 底盘、IMU、步进电机、OLED 全部启用（之前 `main.cpp` 中底盘和 IMU 是注释掉的） |
 
@@ -48,7 +50,7 @@
 
 ```
 [ROS: CONNECTED     ]   ← ROS 状态（WAIT AGENT / CREATING NODE / CONNECTED / RECONNECTING）
-
+AP 192.168.4.1  x1      ← WiFi 热点地址 + 已连接手机数（WiFi 关闭时为空）
 v  +0.25 m/s            ← 整车线速度
 w  +0.50 rad/s          ← 整车角速度
 
@@ -70,6 +72,31 @@ WAITING_AGENT --ping成功--> AGENT_AVAILABLE --创建实体--> CONNECTED
 - 通过 `Serial`（开发板 USB 转串口那个口）与电脑通信，波特率 115200
 - 节点名 `starbot_arm_controller`，话题名与之前保持一致，电脑端无需修改
 
+### 6. WiFi 手机控制（`WifiApp` + `RgbLedApp`）
+
+参考 `esp32_idf_ws/starbot_wifi` 的架构：网络回调只做校验，通过队列交给工作任务操作硬件。
+
+- ESP32 开热点：SSID `StarBot-ESP32`，密码 `starbot123`（`AppConfig.h` 中修改）
+- 手机连上热点后，浏览器打开 **http://192.168.4.1**（OLED 第 2 行会显示地址和已连接手机数）
+- 网页功能：开灯 / 关灯、8 个预设颜色、自定义取色、亮度 0~100%；多台手机同时打开时状态自动同步
+- 与 micro-ROS 串口同时运行，互不影响
+
+WebSocket 接口（`ws://192.168.4.1/ws`，文本指令）：
+
+| 指令 | 说明 |
+|---|---|
+| `STATE_GET` | 查询灯状态 |
+| `LED_ON` / `LED_OFF` | 开灯 / 关灯 |
+| `LED_COLOR,r,g,b` | 设置颜色（0~255），同时开灯 |
+| `LED_BRIGHTNESS,p` | 设置亮度（0~100） |
+
+灯状态变化后，ESP32 向所有手机广播：`{"type":"led","enabled":true,"on":true,"r":255,"g":0,"b":0,"brightness":50}`；
+出错时回复 `{"type":"error","code":"...","message":"..."}`。
+
+> ⚠️ 板载 RGB 灯在 **GPIO48**，与右前编码器 ENC_B1（H2）是同一根线。`kEnableRgbLed=true` 时右前编码器不初始化，
+> 右前轮速改用右后编码器代替（保证右前轮 PID 不会失控），**测试 WiFi 灯时请拔掉 H2**。
+> 小车正式跑时把 `kEnableRgbLed` 改为 `false`，或外接一颗 WS2812 到空闲引脚并修改 `kRgbLedPin`。
+
 ---
 
 ## 三、引脚分配
@@ -86,6 +113,7 @@ WAITING_AGENT --ping成功--> AGENT_AVAILABLE --创建实体--> CONNECTED
 | 右后编码器 H4 | ENC_D1 / ENC_D2 | 18 / 17 |
 | 步进电机串口（CN1、CN27） | RX1（ESP 接收）/ TX1（ESP 发送） | 10 / 11 |
 | I2C（OLED + IMU） | SDA / SCL | 8 / 9 |
+| 板载 RGB 灯（WS2812） | 与 ENC_B1 共用 | 48 |
 | micro-ROS | USB 串口 | 43 / 44（开发板内部） |
 | 未使用 | NET1 / NET2 / NET12 / NET13 / NET14 | 1 / 2 / 12 / 13 / 14 |
 
@@ -98,15 +126,19 @@ src/
 ├── main.cpp                    # 硬件初始化 + micro-ROS 连接状态机
 ├── config/AppConfig.h          # 所有引脚、话题名、参数
 ├── utils/RosAgentState.h       # ROS 连接状态枚举
+├── web/index.html              # 手机控制网页（编译时嵌入固件）
 └── apps/
     ├── CarControllerApp        # 底盘：cmd_vel、PID、里程计
     ├── StepperMotorApp         # 步进电机
     ├── ImuApp                  # IMU
     ├── OledApp                 # OLED 显示
+    ├── WifiApp                 # WiFi 热点 + 网页 + WebSocket
+    ├── RgbLedApp               # RGB 灯（队列 + 工作任务）
     └── MicroRosArmControllerApp # 机械臂（保留，不启用）
 lib/
 ├── Drv8701Control/             # 新增：DRV8701E 驱动
 ├── OledDisplay/                # 新增：SSD1306 封装
+├── RgbLed/                     # 新增：WS2812 RGB 灯封装
 ├── BujinControl/               # Emm_V5 步进电机协议
 ├── Kinematics/ PidController/ IMU/ ...
 ```
@@ -135,7 +167,7 @@ lib/
 
 ### 硬件相关
 1. **编码器电平风险**：H1~H4 由 +5V 供电，如果编码器输出 5V 信号，直接接 ESP32-S3（3.3V，不耐 5V）可能损坏芯片。需确认输出电平，必要时加分压或电平转换。
-2. **GPIO38 与板载 RGB 灯共用**：DevKitC 上 GPIO38 经 R17（0Ω）接 RGB 灯，电机 B 换向时 RGB 灯会乱闪，功能不受影响，介意可拆 R17。
+2. **GPIO48 板载 RGB 灯与右前编码器 ENC_B1 共用**：核心板的 RGB 灯在 GPIO48（官方 DevKitC v1.1 PDF 中为 GPIO38，以实际板子为准）。启用 RGB 灯时右前编码器被停用，右前轮速用右后轮代替，里程计精度下降；两者同时接入时信号会互相干扰。建议下一版 PCB 把 ENC_B1 改到空闲引脚（GPIO1/2/12/13/14）。
 3. **未经实物验证**：本次代码仅通过编译，电机方向、编码器方向、PID 参数均需上板测试。
 
 ### 软件相关
@@ -147,11 +179,13 @@ lib/
 9. **时间同步失败时时间戳错误**：如果 `rmw_uros_sync_session` 失败，`/wheel_odom` 和 `/imu` 的时间戳会从 0 开始。
 10. **里程计仅靠编码器**：没有与 IMU 融合，打滑时航向角会漂移（可在电脑端用 robot_localization 融合）。
 11. **micro-ROS 必须接“USB 转串口”那个口**：代码使用 `Serial`（UART0，开发板上的 CP2102 口），接原生 USB 口无法通信。
-12. **机械臂代码引脚冲突**：`MicroRosArmControllerApp` 使用的 GPIO16/17 在新板上已是 PWMD / ENC_D2，切勿重新启用。`lib/MLTrol` 也未适配新引脚。
+12. **WiFi 没有身份验证**：任何连上热点的人都能控制，热点密码是唯一的保护，请修改默认密码 `starbot123`。WebSocket 指令也没有“控制权”机制，多台手机可同时操作。
+13. **WiFi 灯功能未经实物验证**：代码已编译通过、网页 JS 已做语法检查，但未在板子上实测。
+14. **机械臂代码引脚冲突**：`MicroRosArmControllerApp` 使用的 GPIO16/17 在新板上已是 PWMD / ENC_D2，切勿重新启用。`lib/MLTrol` 也未适配新引脚。
 
 ---
 
 ## 七、后续计划
 
-1. **WiFi 手机控制**：ESP32 开 WiFi，手机网页摇杆控制小车方向并显示 ROS 状态；micro-ROS 仍走串口。速度指令统一调用 `CarControllerApp::setTargetVelocity()`，届时需要增加手机与 ROS 指令的优先级仲裁和超时停车。
+1. **WiFi 手机控制**：✅ 第一阶段已完成（RGB 灯）。下一步：网页摇杆控制小车方向、显示 ROS 状态和实时速度。速度指令统一调用 `CarControllerApp::setTargetVelocity()`，需要增加手机与 ROS 指令的优先级仲裁、控制权和超时停车。
 2. 第二个功能：待定。

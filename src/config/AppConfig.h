@@ -74,6 +74,20 @@ static constexpr uint8_t  kOledWidth = 128;
 static constexpr uint8_t  kOledHeight = 64;
 static constexpr uint32_t kOledRefreshPeriodMs = 200;  // 5Hz
 
+// ---- WiFi 手机控制（SoftAP：手机直连 ESP32 热点，浏览器打开 http://192.168.4.1）----
+static constexpr bool     kEnableWifi = true;
+static constexpr char     kWifiApSsid[] = "StarBot-ESP32";
+static constexpr char     kWifiApPassword[] = "starbot123";  // 至少 8 位；留空则为开放热点
+static constexpr uint8_t  kWifiApChannel = 1;
+static constexpr uint8_t  kWifiApMaxConnections = 4;
+
+// ---- 板载 RGB 灯（WS2812）----
+// 注意：核心板的 RGB 灯在 GPIO48，与右前编码器 ENC_B1（H2）是同一根线！
+// kEnableRgbLed=true 时不初始化右前编码器，右前轮速改用右后编码器代替，测试时请拔掉 H2。
+static constexpr bool     kEnableRgbLed = true;
+static constexpr uint8_t  kRgbLedPin = 48;
+static constexpr uint8_t  kRgbLedMaxBrightness = 128;  // 亮度 100% 对应的通道最大值（0~255），限制电流
+
 // ---- micro-ROS Agent 连接检测 ----
 static constexpr uint32_t kAgentPingPeriodMs = 500;    // 未连接时探测 Agent 的周期
 static constexpr uint32_t kAgentCheckPeriodMs = 1000;  // 已连接时检测是否断线的周期

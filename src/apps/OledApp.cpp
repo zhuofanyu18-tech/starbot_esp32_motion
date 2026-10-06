@@ -3,8 +3,9 @@
 OledApp::OledApp()
     : oled_(app_config::kOledWidth, app_config::kOledHeight, &Wire, app_config::kI2cClockHz) {}
 
-bool OledApp::begin(CarControllerApp &car) {
+bool OledApp::begin(CarControllerApp &car, const WifiApp &wifi) {
     car_ = &car;
+    wifi_ = &wifi;
     if (!oled_.begin(app_config::kOledI2cAddress)) return false;
 
     // 优先级 1，低于 PID 任务，刷新屏幕不影响电机控制
@@ -31,6 +32,12 @@ const char *OledApp::rosStateText() const {
 void OledApp::render() {
     oled_.clear();
     oled_.printLine(0, true, "%-20s", rosStateText());
+
+    // 第 1 行：WiFi 热点地址和已连接手机数
+    if (wifi_->isRunning()) {
+        const IPAddress ip = wifi_->apIp();
+        oled_.printLine(1, "AP %u.%u.%u.%u  x%u", ip[0], ip[1], ip[2], ip[3], wifi_->stationCount());
+    }
 
     // 第 2、3 行：整车速度（来自编码器里程计）
     oled_.printLine(2, "v %+6.2f m/s", car_->getLinearSpeed());

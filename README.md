@@ -16,6 +16,7 @@
 | IMU | 维特 IMU（I2C），发布 `/imu` |
 | OLED 显示 | SSD1306 128×64，实时显示 ROS 连接状态、小车速度、四轮速度 |
 | 断线重连 | Agent 未启动或 USB 断开时自动重连，断线时底盘自动停车 |
+| WiFi 手机控制 | ESP32 开热点，手机浏览器控制板载 RGB 灯（开关 / 颜色 / 亮度），与 ROS 同时运行 |
 | 机械臂 | 已改由电脑端直接控制，ESP32 中保留代码但不启用 |
 
 ---
@@ -109,6 +110,14 @@ ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.1}}"
 ros2 topic echo /wheel_odom
 ```
 
+### 5. 手机控制（WiFi）
+
+1. 手机连接 WiFi 热点 **`StarBot-ESP32`**，密码 **`starbot123`**
+2. 浏览器打开 **http://192.168.4.1**
+3. 在网页上控制 RGB 灯的开关、颜色和亮度
+
+> 板载 RGB 灯（GPIO48）与右前编码器 H2 共用引脚，测试灯时请拔掉 H2。小车正式运行时在 `AppConfig.h` 中设置 `kEnableRgbLed = false`。
+
 首次装车如果发现某个轮子转向或编码器方向相反，修改 [src/config/AppConfig.h](src/config/AppConfig.h) 中的 `kMotorReversed` / `kEncoderReversed` 即可，详见 [src/README.md](src/README.md#五使用与调试)。
 
 ---
@@ -120,12 +129,14 @@ ros2 topic echo /wheel_odom
 ├── src/
 │   ├── main.cpp              # 入口：硬件初始化 + micro-ROS 连接状态机
 │   ├── config/AppConfig.h    # 所有引脚、话题名、底盘与 PID 参数
-│   ├── apps/                 # 应用层：底盘 / 步进电机 / IMU / OLED / 机械臂（停用）
+│   ├── apps/                 # 应用层：底盘 / 步进电机 / IMU / OLED / WiFi / RGB 灯 / 机械臂（停用）
+│   ├── web/index.html        # 手机控制网页（编译时嵌入固件）
 │   ├── utils/                # 工具：ROS 消息内存分配、连接状态定义
 │   └── README.md             # 固件详细说明（修改记录、引脚、已知问题）
 ├── lib/
 │   ├── Drv8701Control/       # DRV8701E 电机驱动
 │   ├── OledDisplay/          # SSD1306 OLED 封装
+│   ├── RgbLed/               # WS2812 RGB 灯封装
 │   ├── BujinControl/         # Emm_V5 步进电机串口协议
 │   ├── Kinematics/           # 差速运动学与里程计
 │   ├── PidController/        # PID 控制器
@@ -149,6 +160,9 @@ ros2 topic echo /wheel_odom
 | `kMotorReversed` / `kEncoderReversed` | 全部 `false` | 电机 / 编码器方向反转 |
 | `kEnableAutoHoming` | `false` | 步进电机上电自动回零 |
 | `kOledI2cAddress` | `0x3C` | OLED 地址（部分模块为 `0x3D`） |
+| `kEnableWifi` | `true` | 开启 WiFi 热点和手机控制网页 |
+| `kWifiApSsid` / `kWifiApPassword` | `StarBot-ESP32` / `starbot123` | 热点名称和密码（请修改默认密码） |
+| `kEnableRgbLed` | `true` | 启用板载 RGB 灯（会停用右前编码器） |
 
 ---
 
@@ -164,6 +178,7 @@ ros2 topic echo /wheel_odom
 
 ## 后续计划
 
-- [ ] WiFi 手机控制：手机网页摇杆控制小车方向、显示 ROS 状态（micro-ROS 仍走串口）
+- [x] WiFi 手机控制（第一阶段）：手机网页控制 RGB 灯开关、颜色、亮度
+- [ ] WiFi 手机控制（第二阶段）：网页摇杆控制小车方向、显示 ROS 状态和实时速度
 - [ ] `/cmd_vel` 超时保护与多指令源优先级仲裁
 - [ ] 第二个扩展功能（待定）

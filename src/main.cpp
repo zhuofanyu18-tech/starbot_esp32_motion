@@ -13,6 +13,8 @@
 #include "apps/ImuApp.h"
 #include "apps/StepperMotorApp.h"
 #include "apps/OledApp.h"
+#include "apps/RgbLedApp.h"
+#include "apps/WifiApp.h"
 
 namespace {
 
@@ -26,6 +28,8 @@ CarControllerApp         car_app_;
 ImuApp                   imu_app_;
 StepperMotorApp          stepper_app_;
 OledApp                  oled_app_;
+RgbLedApp                rgb_led_app_;
+WifiApp                  wifi_app_;
 
 RosAgentState agent_state_ = RosAgentState::kWaitingAgent;
 uint32_t      last_agent_check_ms_ = 0;
@@ -140,7 +144,11 @@ void setup() {
     stepper_app_.initHardware();
     // arm_app_.begin(support_, node_, executor_);  // 机械臂已禁用
 
-    oled_app_.begin(car_app_);
+    // WiFi 手机控制：热点 + 网页，与 micro-ROS 串口同时运行
+    rgb_led_app_.begin();
+    wifi_app_.begin(rgb_led_app_);
+
+    oled_app_.begin(car_app_, wifi_app_);
     setAgentState(RosAgentState::kWaitingAgent);
 }
 
